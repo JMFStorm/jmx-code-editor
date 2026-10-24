@@ -85,6 +85,16 @@ pub enum Command {
     ZoomReset,
     Help,
     ShowShortcuts,
+    /// Move the cursor to the other view (left/right).
+    FocusOtherView,
+    FocusLeft,
+    FocusRight,
+    /// Switch between one and two views.
+    ToggleSplit,
+    /// Put the divider between the views back in the center.
+    ResetSplit,
+    /// Open the File menu (handled by the session, which owns menu state).
+    FileMenu,
     Quit,
 }
 
@@ -98,11 +108,12 @@ pub enum Group {
     Edit,
     Clipboard,
     Search,
+    Views,
     View,
 }
 
 impl Group {
-    pub const ALL: [Group; 8] = [
+    pub const ALL: [Group; 9] = [
         Group::File,
         Group::Tabs,
         Group::Move,
@@ -110,6 +121,7 @@ impl Group {
         Group::Edit,
         Group::Clipboard,
         Group::Search,
+        Group::Views,
         Group::View,
     ];
 
@@ -122,6 +134,7 @@ impl Group {
             Group::Edit => "Editing",
             Group::Clipboard => "Clipboard & undo",
             Group::Search => "Search & navigation",
+            Group::Views => "Split views",
             Group::View => "View & help",
         }
     }
@@ -172,6 +185,12 @@ impl Command {
             ZoomReset => "Reset font size",
             Help => "Help",
             ShowShortcuts => "Keyboard shortcuts",
+            FocusOtherView => "Move cursor to the other view",
+            FocusLeft => "Move cursor to the left view",
+            FocusRight => "Move cursor to the right view",
+            ToggleSplit => "Toggle one / two views",
+            ResetSplit => "Center the divider between views",
+            FileMenu => "Open the File menu",
             Quit => "Quit",
         };
         s.to_string()
@@ -185,7 +204,10 @@ impl Command {
             Newline | Indent | Outdent | Backspace | Delete | DeleteWordLeft | DeleteWordRight
             | DeleteLine | MoveLineUp | MoveLineDown | DuplicateLine => Group::Edit,
             Copy | Cut | Paste | Undo | Redo => Group::Clipboard,
-            NewFile | OpenFile | OpenPath | Save | SaveAs | CloseFile | Quit => Group::File,
+            NewFile | OpenFile | OpenPath | Save | SaveAs | CloseFile | Quit | FileMenu => {
+                Group::File
+            }
+            FocusOtherView | FocusLeft | FocusRight | ToggleSplit | ResetSplit => Group::Views,
             NextTab | PrevTab | GotoTab(_) => Group::Tabs,
             Find | FindNext | FindPrev | GotoLine => Group::Search,
             ScrollUp | ScrollDown | ZoomIn | ZoomOut | ZoomReset | Help | ShowShortcuts => {

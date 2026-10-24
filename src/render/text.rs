@@ -96,6 +96,7 @@ impl TextSystem {
             .and_then(|run| run.glyphs.first().map(|g| g.w))
             .filter(|w| *w > 0.0)
             .unwrap_or(font_px * 0.6);
+        log::debug!("font {font_px}px: cell {}x{}", self.cell_w, self.line_h);
     }
 
     fn shape(&mut self, text: &str) -> Buffer {

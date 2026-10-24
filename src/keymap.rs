@@ -89,6 +89,13 @@ const OTHERS: &[Binding] = &[
     bind(true, YES, false, c('s'), SaveAs),
     bind(true, ANY, false, c('w'), CloseFile),
     bind(true, ANY, false, c('q'), Quit),
+    bind(false, ANY, true, c('f'), FileMenu),
+    // Split views
+    bind(false, NO, false, n(NK::F6), FocusOtherView),
+    bind(true, ANY, false, c('1'), FocusLeft),
+    bind(true, ANY, false, c('2'), FocusRight),
+    bind(false, YES, false, n(NK::F6), ToggleSplit),
+    bind(true, ANY, false, n(NK::F6), ResetSplit),
     // Tabs
     bind(true, NO, false, n(NK::Tab), NextTab),
     bind(true, YES, false, n(NK::Tab), PrevTab),
@@ -142,8 +149,8 @@ const OTHERS: &[Binding] = &[
     bind(true, ANY, false, c('-'), ZoomOut),
     hidden(bind(true, ANY, false, c('_'), ZoomOut)),
     bind(true, ANY, false, c('0'), ZoomReset),
-    bind(false, NO, false, n(NK::F1), Help),
-    bind(false, YES, false, n(NK::F1), ShowShortcuts),
+    bind(false, ANY, false, n(NK::F1), Help),
+    bind(false, ANY, false, n(NK::F2), ShowShortcuts),
 ];
 
 /// All bindings, motions first.

@@ -35,9 +35,43 @@ pub struct Message {
 
 pub const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub struct Editor {
+/// One of the two side-by-side views. Each owns its tabs; a file is open in at most one view.
+pub struct Pane {
     pub docs: Vec<Document>,
     pub active: usize,
+    /// Viewport size in text cells, updated by the layout on resize/zoom.
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl Pane {
+    fn new() -> Self {
+        Self {
+            docs: Vec::new(),
+            active: 0,
+            rows: 30,
+            cols: 80,
+        }
+    }
+
+    /// The active document, if the view has any tabs.
+    pub fn doc(&self) -> Option<&Document> {
+        self.docs.get(self.active)
+    }
+}
+
+pub const MIN_SPLIT: f32 = 0.15;
+pub const MAX_SPLIT: f32 = 0.85;
+
+pub struct Editor {
+    /// Left (0) and right (1) views.
+    pub panes: [Pane; 2],
+    /// View that has the cursor.
+    pub focus: usize,
+    /// Two views side by side; otherwise only the focused view is shown.
+    pub split: bool,
+    /// Left view's share of the width.
+    pub split_ratio: f32,
     pub config: Config,
     pub minibuffer: Option<Minibuffer>,
     pub picker: Option<FilePicker>,
@@ -45,9 +79,6 @@ pub struct Editor {
     pub picker_rows: usize,
     pub message: Option<Message>,
     pub find_query: String,
-    /// Viewport size in text cells, updated by the app on resize/zoom.
-    pub rows: usize,
-    pub cols: usize,
     pub should_quit: bool,
     clipboard: Option<arboard::Clipboard>,
     /// Fallback when the system clipboard is unavailable.
@@ -62,37 +93,68 @@ impl Editor {
             .map_err(|e| log::warn!("system clipboard unavailable: {e}"))
             .ok();
         let mut ed = Self {
-            docs: Vec::new(),
-            active: 0,
+            panes: [Pane::new(), Pane::new()],
+            focus: 0,
+            split: true,
+            split_ratio: 0.5,
             config,
             minibuffer: None,
             picker: None,
             picker_rows: 10,
             message: None,
             find_query: String::new(),
-            rows: 30,
-            cols: 80,
             should_quit: false,
             clipboard,
             internal_clip: String::new(),
             line_clip: None,
         };
+        // Files go to the left view, Help to the right; the cursor starts on the left.
         for p in paths {
             ed.open_path(p);
         }
-        if ed.docs.is_empty() {
-            ed.docs.push(Document::new_empty(None, ed.config.tab_width));
+        if ed.panes[0].docs.is_empty() {
+            let doc = Document::new_empty(None, ed.config.tab_width);
+            ed.panes[0].docs.push(doc);
         }
-        ed.active = 0;
+        ed.panes[0].active = 0;
+        ed.panes[1]
+            .docs
+            .push(Document::new_virtual(help::HELP_TITLE, &help::help_text()));
+        ed.focus = 0;
         ed
     }
 
+    pub fn pane(&self) -> &Pane {
+        &self.panes[self.focus]
+    }
+
+    pub fn pane_mut(&mut self) -> &mut Pane {
+        &mut self.panes[self.focus]
+    }
+
+    /// True if the focused view has a document (views can be empty).
+    pub fn has_doc(&self) -> bool {
+        self.pane().doc().is_some()
+    }
+
+    /// The focused view's active document. Only call when `has_doc()`.
     pub fn doc(&self) -> &Document {
-        &self.docs[self.active]
+        let p = self.pane();
+        &p.docs[p.active]
     }
 
     pub fn doc_mut(&mut self) -> &mut Document {
-        &mut self.docs[self.active]
+        let p = self.pane_mut();
+        let i = p.active;
+        &mut p.docs[i]
+    }
+
+    pub fn all_docs(&self) -> impl Iterator<Item = &Document> {
+        self.panes.iter().flat_map(|p| p.docs.iter())
+    }
+
+    pub fn set_split_ratio(&mut self, ratio: f32) {
+        self.split_ratio = ratio.clamp(MIN_SPLIT, MAX_SPLIT);
     }
 
     pub fn info(&mut self, text: impl Into<String>) {
@@ -129,7 +191,10 @@ impl Editor {
     }
 
     pub fn ensure_cursor_visible(&mut self) {
-        let (rows, cols, tab) = (self.rows, self.cols, self.config.tab_width);
+        if !self.has_doc() {
+            return;
+        }
+        let (rows, cols, tab) = (self.pane().rows, self.pane().cols, self.config.tab_width);
         let doc = self.doc_mut();
         let head = doc.selection.head;
         let line = doc.rope.char_to_line(head);
@@ -156,7 +221,7 @@ impl Editor {
             self.prompt_changed();
             return;
         }
-        if text.chars().any(|c| c.is_control() && c != '\t') {
+        if text.chars().any(|c| c.is_control() && c != '\t') || !self.has_doc() {
             return;
         }
         if self.doc().read_only {
@@ -168,6 +233,7 @@ impl Editor {
     }
 
     pub fn execute(&mut self, cmd: Command) {
+        log::trace!("command {cmd:?}");
         if self.picker.is_some() && self.picker_command(cmd) {
             return;
         }
@@ -175,7 +241,10 @@ impl Editor {
             return;
         }
         use Command::*;
-        if self.doc().read_only && modifies_text(cmd) {
+        if !self.has_doc() && needs_doc(cmd) {
+            return;
+        }
+        if modifies_text(cmd) && self.doc().read_only {
             self.warn(format!("{} is read-only", self.doc().title()));
             return;
         }
@@ -219,9 +288,10 @@ impl Editor {
                 }
             }
             NewFile => {
-                self.docs
-                    .push(Document::new_empty(None, self.config.tab_width));
-                self.active = self.docs.len() - 1;
+                let doc = Document::new_empty(None, self.config.tab_width);
+                let pane = self.pane_mut();
+                pane.docs.push(doc);
+                pane.active = pane.docs.len() - 1;
             }
             OpenFile => {
                 self.minibuffer = None;
@@ -234,20 +304,28 @@ impl Editor {
             Save => self.save(AfterSave::Nothing),
             SaveAs => self.prompt_save_as(AfterSave::Nothing),
             CloseFile => {
+                let (pane, index) = (self.focus, self.pane().active);
                 if self.doc().is_dirty() {
                     self.minibuffer = Some(Minibuffer::new(
-                        PromptKind::ConfirmClose(self.active),
+                        PromptKind::ConfirmClose { pane, index },
                         String::new(),
                     ));
                 } else {
-                    self.close_doc(self.active);
+                    self.close_doc(pane, index);
                 }
             }
-            NextTab => self.active = (self.active + 1) % self.docs.len(),
-            PrevTab => self.active = (self.active + self.docs.len() - 1) % self.docs.len(),
+            NextTab => {
+                let p = self.pane_mut();
+                p.active = (p.active + 1) % p.docs.len();
+            }
+            PrevTab => {
+                let p = self.pane_mut();
+                p.active = (p.active + p.docs.len() - 1) % p.docs.len();
+            }
             GotoTab(i) => {
-                if i < self.docs.len() {
-                    self.active = i;
+                let p = self.pane_mut();
+                if i < p.docs.len() {
+                    p.active = i;
                 }
             }
             Find => self.start_find(),
@@ -263,6 +341,16 @@ impl Editor {
             ZoomReset => self.zoom(self.config.default_font_size),
             Help => self.open_virtual(help::HELP_TITLE, &help::help_text()),
             ShowShortcuts => self.open_virtual(help::SHORTCUTS_TITLE, &help::shortcuts_text()),
+            FocusOtherView => self.focus_view(1 - self.focus),
+            FocusLeft => self.focus_view(0),
+            FocusRight => self.focus_view(1),
+            ToggleSplit => {
+                self.split = !self.split;
+                self.info(if self.split { "Two views" } else { "One view" });
+            }
+            ResetSplit => self.split_ratio = 0.5,
+            // Menus belong to the session (UI state); nothing to do here.
+            FileMenu => {}
             Quit => self.quit(),
         }
         if !keep_scroll {
@@ -270,19 +358,42 @@ impl Editor {
         }
     }
 
-    /// Show a built-in read-only page, reusing its tab if already open.
+    pub fn focus_view(&mut self, pane: usize) {
+        if pane != self.focus {
+            log::debug!("focus view {pane}");
+            self.focus = pane;
+            self.minibuffer = None;
+            if let Some(doc) = self.panes[pane].docs.get_mut(self.panes[pane].active) {
+                doc.history.break_coalescing();
+            }
+        }
+    }
+
+    /// Find a document anywhere: (view, tab index).
+    fn find_doc(&self, pred: impl Fn(&Document) -> bool) -> Option<(usize, usize)> {
+        self.panes
+            .iter()
+            .enumerate()
+            .find_map(|(p, pane)| pane.docs.iter().position(&pred).map(|i| (p, i)))
+    }
+
+    /// Focus the view holding tab `index` and make it active.
+    fn show_doc(&mut self, pane: usize, index: usize) {
+        self.focus_view(pane);
+        self.panes[pane].active = index;
+    }
+
+    /// Show a built-in read-only page, reusing its tab if open; new pages open in the right view.
     fn open_virtual(&mut self, name: &str, text: &str) {
         self.minibuffer = None;
-        if let Some(i) = self
-            .docs
-            .iter()
-            .position(|d| d.virtual_name.as_deref() == Some(name))
-        {
-            self.active = i;
+        if let Some((p, i)) = self.find_doc(|d| d.virtual_name.as_deref() == Some(name)) {
+            self.show_doc(p, i);
             return;
         }
-        self.docs.push(Document::new_virtual(name, text));
-        self.active = self.docs.len() - 1;
+        let right = &mut self.panes[1];
+        right.docs.push(Document::new_virtual(name, text));
+        let index = right.docs.len() - 1;
+        self.show_doc(1, index);
     }
 
     // ---------------------------------------------------------------- picker
@@ -321,7 +432,7 @@ impl Editor {
             ZoomIn | ZoomOut | ZoomReset => return false,
             // Anything that leaves the picker (new file, help, quit, ...) closes it first.
             NewFile | OpenPath | Help | ShowShortcuts | Quit | CloseFile | NextTab | PrevTab
-            | GotoTab(_) => {
+            | GotoTab(_) | FocusOtherView | FocusLeft | FocusRight | ToggleSplit => {
                 self.picker = None;
                 return false;
             }
@@ -339,11 +450,15 @@ impl Editor {
         };
         match p.activate() {
             PickResult::Open(path) => {
+                log::debug!("picker open {}", path.display());
                 self.picker = None;
                 self.open_path(&path);
                 self.ensure_cursor_visible();
             }
-            PickResult::None => p.ensure_visible(self.picker_rows),
+            PickResult::None => {
+                log::debug!("picker in {}", p.dir.display());
+                p.ensure_visible(self.picker_rows);
+            }
         }
     }
 
@@ -369,13 +484,25 @@ impl Editor {
     }
 
     pub fn scroll(&mut self, lines: isize) {
-        let doc = self.doc_mut();
-        let total = doc.rope.len_lines();
-        doc.view.scroll_lines(lines, total);
+        self.scroll_pane(self.focus, lines);
     }
 
-    pub fn scroll_horizontal(&mut self, cols: isize) {
-        self.doc_mut().view.scroll_cols(cols);
+    /// Scroll any view (the one under the mouse need not have focus).
+    pub fn scroll_pane(&mut self, pane: usize, lines: isize) {
+        let p = &mut self.panes[pane];
+        let i = p.active;
+        if let Some(doc) = p.docs.get_mut(i) {
+            let total = doc.rope.len_lines();
+            doc.view.scroll_lines(lines, total);
+        }
+    }
+
+    pub fn scroll_pane_horizontal(&mut self, pane: usize, cols: isize) {
+        let p = &mut self.panes[pane];
+        let i = p.active;
+        if let Some(doc) = p.docs.get_mut(i) {
+            doc.view.scroll_cols(cols);
+        }
     }
 
     fn zoom(&mut self, size: f32) {
@@ -429,7 +556,7 @@ impl Editor {
 
     fn move_cursor(&mut self, m: Motion, extend: bool) {
         let tab = self.config.tab_width;
-        let page = self.rows.saturating_sub(1).max(1);
+        let page = self.pane().rows.saturating_sub(1).max(1);
         let doc = self.doc_mut();
         let rope = &doc.rope;
         let sel = doc.selection;
@@ -806,11 +933,12 @@ impl Editor {
 
     // ---------------------------------------------------------------- files
 
+    /// Folder to start Open/Save As in: the focused file's folder, else the other view's file's
+    /// folder (e.g. when the cursor is in Help), else the working directory.
     fn dir_hint(&self) -> String {
-        let dir = self
-            .doc()
-            .path
-            .as_ref()
+        let file_of = |p: usize| self.panes[p].doc().and_then(|d| d.path.as_ref());
+        let dir = file_of(self.focus)
+            .or_else(|| file_of(1 - self.focus))
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .filter(|p| !p.as_os_str().is_empty())
             .or_else(|| std::env::current_dir().ok());
@@ -833,29 +961,40 @@ impl Editor {
             return;
         }
         let canon = std::fs::canonicalize(path).ok();
-        if let Some(i) = self.docs.iter().position(|d| {
+        if let Some((p, i)) = self.find_doc(|d| {
             d.path.as_deref() == Some(path)
                 || canon.is_some()
                     && d.path.as_ref().and_then(|p| std::fs::canonicalize(p).ok()) == canon
         }) {
-            self.active = i;
+            self.show_doc(p, i);
             return;
         }
         match Document::open(path, self.config.tab_width) {
             Ok(doc) => {
+                log::info!(
+                    "opened {} ({} lines, {}, {}{}{})",
+                    path.display(),
+                    doc.rope.len_lines(),
+                    doc.line_ending.label(),
+                    doc.indent.label(),
+                    if doc.lossy { ", lossy UTF-8" } else { "" },
+                    if path.exists() { "" } else { ", new file" },
+                );
                 let exists = path.exists();
                 let lossy = doc.lossy;
                 // Replace a pristine untitled tab instead of keeping it around.
-                let reuse = self.docs.len() == 1
-                    && self.docs[0].path.is_none()
-                    && !self.docs[0].is_dirty()
-                    && self.docs[0].rope.len_chars() == 0;
+                let pane = self.pane_mut();
+                let reuse = pane.docs.len() == 1
+                    && pane.docs[0].path.is_none()
+                    && pane.docs[0].virtual_name.is_none()
+                    && !pane.docs[0].is_dirty()
+                    && pane.docs[0].rope.len_chars() == 0;
                 if reuse {
-                    self.docs[0] = doc;
-                    self.active = 0;
+                    pane.docs[0] = doc;
+                    pane.active = 0;
                 } else {
-                    self.docs.push(doc);
-                    self.active = self.docs.len() - 1;
+                    pane.docs.push(doc);
+                    pane.active = pane.docs.len() - 1;
                 }
                 if lossy {
                     self.warn("File is not valid UTF-8; invalid bytes were replaced and will be lost on save");
@@ -863,7 +1002,10 @@ impl Editor {
                     self.info(format!("New file: {}", path.display()));
                 }
             }
-            Err(e) => self.error(format!("{e:#}")),
+            Err(e) => {
+                log::warn!("open {} failed: {e:#}", path.display());
+                self.error(format!("{e:#}"));
+            }
         }
     }
 
@@ -876,10 +1018,21 @@ impl Editor {
             Ok(()) => {
                 let doc = self.doc();
                 let msg = format!("Saved {} ({} lines)", doc.title(), doc.rope.len_lines());
+                log::info!(
+                    "saved {} ({} lines, {})",
+                    doc.path
+                        .as_ref()
+                        .map_or(String::new(), |p| p.display().to_string()),
+                    doc.rope.len_lines(),
+                    doc.line_ending.label()
+                );
                 self.info(msg);
                 self.after_save(after);
             }
-            Err(e) => self.error(format!("{e:#}")),
+            Err(e) => {
+                log::error!("save failed: {e:#}");
+                self.error(format!("{e:#}"));
+            }
         }
     }
 
@@ -894,24 +1047,31 @@ impl Editor {
     fn after_save(&mut self, after: AfterSave) {
         match after {
             AfterSave::Nothing => {}
-            AfterSave::CloseDoc => self.close_doc(self.active),
+            AfterSave::CloseDoc => self.close_doc(self.focus, self.pane().active),
             AfterSave::ContinueQuit => self.continue_quit(),
         }
     }
 
-    fn close_doc(&mut self, i: usize) {
-        self.docs.remove(i);
-        if self.docs.is_empty() {
-            self.docs
-                .push(Document::new_empty(None, self.config.tab_width));
-        }
-        if self.active > i || self.active >= self.docs.len() {
-            self.active = self.active.saturating_sub(1);
+    /// Close a tab. The view may become empty; it then shows a placeholder.
+    fn close_doc(&mut self, pane: usize, i: usize) {
+        let p = &mut self.panes[pane];
+        log::info!(
+            "closed {}{}",
+            p.docs[i].title(),
+            if p.docs[i].is_dirty() {
+                " (discarded changes)"
+            } else {
+                ""
+            }
+        );
+        p.docs.remove(i);
+        if p.active > i || p.active >= p.docs.len() {
+            p.active = p.active.saturating_sub(1);
         }
     }
 
     fn quit(&mut self) {
-        if self.docs.iter().any(Document::is_dirty) {
+        if self.all_docs().any(Document::is_dirty) {
             self.minibuffer = Some(Minibuffer::new(PromptKind::ConfirmQuit, String::new()));
         } else {
             self.should_quit = true;
@@ -920,18 +1080,21 @@ impl Editor {
 
     /// Save every dirty document; untitled ones get a Save As prompt that resumes quitting.
     fn continue_quit(&mut self) {
-        for i in 0..self.docs.len() {
-            if !self.docs[i].is_dirty() {
-                continue;
-            }
-            self.active = i;
-            if self.docs[i].path.is_none() {
-                self.prompt_save_as(AfterSave::ContinueQuit);
-                return;
-            }
-            if let Err(e) = self.docs[i].save() {
-                self.error(format!("{e:#}"));
-                return;
+        for p in 0..self.panes.len() {
+            for i in 0..self.panes[p].docs.len() {
+                if !self.panes[p].docs[i].is_dirty() {
+                    continue;
+                }
+                self.show_doc(p, i);
+                if self.doc().path.is_none() {
+                    self.prompt_save_as(AfterSave::ContinueQuit);
+                    return;
+                }
+                if let Err(e) = self.doc_mut().save() {
+                    log::error!("save before quit failed: {e:#}");
+                    self.error(format!("{e:#}"));
+                    return;
+                }
             }
         }
         self.should_quit = true;
@@ -1059,7 +1222,7 @@ impl Editor {
                 self.find_step(true);
             }
             PromptKind::GotoLine => self.goto_line(&input),
-            PromptKind::ConfirmClose(_) | PromptKind::ConfirmQuit => self.minibuffer = Some(mb),
+            PromptKind::ConfirmClose { .. } | PromptKind::ConfirmQuit => self.minibuffer = Some(mb),
         }
         self.ensure_cursor_visible();
     }
@@ -1069,11 +1232,11 @@ impl Editor {
             return;
         };
         match (mb.kind.clone(), c) {
-            (PromptKind::ConfirmClose(i), 'y') => {
-                self.active = i;
+            (PromptKind::ConfirmClose { pane, index }, 'y') => {
+                self.show_doc(pane, index);
                 self.save(AfterSave::CloseDoc);
             }
-            (PromptKind::ConfirmClose(i), 'n') => self.close_doc(i),
+            (PromptKind::ConfirmClose { pane, index }, 'n') => self.close_doc(pane, index),
             (PromptKind::ConfirmQuit, 's') => self.continue_quit(),
             (PromptKind::ConfirmQuit, 'd') => self.should_quit = true,
             (_, 'c') => {}
@@ -1100,7 +1263,7 @@ impl Editor {
         let pos = mv::pos_at_col(&doc.rope, line, col.saturating_sub(1), tab);
         doc.move_to(pos, false);
         // Put the target line near the middle of the screen.
-        let rows = self.rows;
+        let rows = self.pane().rows;
         self.doc_mut().view.top_line = line.saturating_sub(rows / 3);
     }
 
@@ -1153,6 +1316,29 @@ impl Editor {
     }
 }
 
+/// Commands that need a document; ignored while the focused view is empty.
+fn needs_doc(cmd: Command) -> bool {
+    use Command::*;
+    !matches!(
+        cmd,
+        NewFile
+            | OpenFile
+            | OpenPath
+            | Help
+            | ShowShortcuts
+            | FocusOtherView
+            | FocusLeft
+            | FocusRight
+            | ToggleSplit
+            | ResetSplit
+            | FileMenu
+            | ZoomIn
+            | ZoomOut
+            | ZoomReset
+            | Quit
+    )
+}
+
 /// Commands that change the text, refused on read-only pages.
 fn modifies_text(cmd: Command) -> bool {
     use Command::*;
@@ -1190,8 +1376,122 @@ mod tests {
 
     fn editor(text: &str) -> Editor {
         let mut ed = Editor::new(Config::default(), &[]);
-        ed.docs[0] = Document::from_bytes(text.as_bytes(), 4);
+        ed.panes[0].docs[0] = Document::from_bytes(text.as_bytes(), 4);
         ed
+    }
+
+    fn titles(ed: &Editor, pane: usize) -> Vec<String> {
+        ed.panes[pane].docs.iter().map(Document::title).collect()
+    }
+
+    #[test]
+    fn startup_has_file_left_and_help_right() {
+        let ed = editor("x");
+        assert!(ed.split);
+        assert_eq!(ed.focus, 0);
+        assert_eq!(titles(&ed, 1), [help::HELP_TITLE]);
+        assert!(!ed.doc().read_only);
+    }
+
+    #[test]
+    fn focus_split_and_reset_commands() {
+        let mut ed = editor("x");
+        ed.execute(Command::FocusOtherView);
+        assert_eq!(ed.focus, 1);
+        assert!(ed.doc().read_only);
+        ed.insert_text("nope");
+        assert_eq!(ed.doc().rope.len_chars(), help::help_text().chars().count());
+        ed.execute(Command::FocusLeft);
+        assert_eq!(ed.focus, 0);
+        ed.execute(Command::FocusRight);
+        assert_eq!(ed.focus, 1);
+        ed.execute(Command::ToggleSplit);
+        assert!(!ed.split);
+        ed.set_split_ratio(0.99);
+        assert_eq!(ed.split_ratio, MAX_SPLIT);
+        ed.execute(Command::ResetSplit);
+        assert_eq!(ed.split_ratio, 0.5);
+    }
+
+    #[test]
+    fn help_and_shortcuts_open_on_the_right_and_reuse_tabs() {
+        let mut ed = editor("x");
+        ed.execute(Command::ShowShortcuts);
+        assert_eq!(ed.focus, 1);
+        assert_eq!(titles(&ed, 1), [help::HELP_TITLE, help::SHORTCUTS_TITLE]);
+        ed.execute(Command::FocusLeft);
+        ed.execute(Command::Help);
+        assert_eq!((ed.focus, ed.pane().active), (1, 0));
+        assert_eq!(ed.panes[1].docs.len(), 2);
+        // In one-view mode, Help still goes right and brings that view up.
+        ed.execute(Command::FocusLeft);
+        ed.execute(Command::ToggleSplit);
+        ed.execute(Command::Help);
+        assert_eq!(ed.focus, 1);
+    }
+
+    #[test]
+    fn opening_a_file_from_the_other_view_focuses_it() {
+        let dir = std::env::temp_dir().join(format!("jmx-ed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "hi").unwrap();
+        let mut ed = Editor::new(Config::default(), std::slice::from_ref(&file));
+        ed.execute(Command::FocusRight);
+        ed.open_path(&file);
+        assert_eq!(ed.focus, 0);
+        assert_eq!(ed.panes[0].docs.len(), 1);
+        // A new file opened while the right view has focus lands on the right.
+        ed.execute(Command::FocusRight);
+        let other = dir.join("b.txt");
+        ed.open_path(&other);
+        assert_eq!(ed.focus, 1);
+        assert_eq!(
+            titles(&ed, 1),
+            [help::HELP_TITLE.to_string(), "b.txt".into()]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_view_is_safe() {
+        let mut ed = editor("x");
+        ed.execute(Command::FocusRight);
+        ed.execute(Command::CloseFile);
+        assert!(!ed.has_doc());
+        for cmd in [
+            Command::Move(Motion::Down, true),
+            Command::Paste,
+            Command::Save,
+            Command::Find,
+            Command::NextTab,
+            Command::CloseFile,
+            Command::Undo,
+            Command::GotoLine,
+        ] {
+            ed.execute(cmd);
+        }
+        ed.insert_text("x");
+        ed.ensure_cursor_visible();
+        ed.scroll_pane(1, 3);
+        assert!(!ed.has_doc());
+        ed.execute(Command::NewFile);
+        assert!(ed.has_doc());
+    }
+
+    #[test]
+    fn quit_asks_when_either_view_is_dirty() {
+        let mut ed = editor("x");
+        ed.execute(Command::FocusRight);
+        ed.execute(Command::NewFile);
+        ed.insert_text("unsaved");
+        ed.execute(Command::FocusLeft);
+        ed.execute(Command::Quit);
+        assert!(!ed.should_quit);
+        assert!(matches!(
+            ed.minibuffer.as_ref().map(|m| &m.kind),
+            Some(PromptKind::ConfirmQuit)
+        ));
     }
 
     fn text(ed: &Editor) -> String {

@@ -9,7 +9,9 @@ use crate::editor::movement::{self as mv, char_width};
 use crate::editor::{Editor, MsgKind};
 use crate::keymap;
 use crate::theme::{Rgba, Theme};
-use crate::ui::layout::{Layout, PickerLayout, Rect, tab_rects, toolbar_buttons};
+use crate::ui::layout::{
+    Layout, PaneLayout, PickerLayout, Rect, file_menu_layout, tab_rects, toolbar_buttons,
+};
 use crate::ui::minibuffer::PromptKind;
 
 #[derive(Default)]
@@ -28,6 +30,11 @@ pub struct FrameData {
 pub struct UiState {
     pub hover_button: Option<usize>,
     pub pressed_button: Option<usize>,
+    /// File menu dropdown is open; `menu_hover` is the highlighted row.
+    pub menu_open: bool,
+    pub menu_hover: Option<usize>,
+    /// Mouse is over (or dragging) the line between the views.
+    pub divider_active: bool,
 }
 
 struct Builder<'a> {
@@ -111,11 +118,23 @@ pub fn build(
     let full = Rect::new(0.0, 0.0, layout.width, layout.height);
     b.rect(full, theme.bg);
 
-    draw_text_area(&mut b, ed, layout, cursor_on);
+    for pl in &layout.panes {
+        let focused = pl.pane == ed.focus;
+        draw_text_area(&mut b, ed, layout, pl, focused, cursor_on);
+        draw_tab_bar(&mut b, ed, layout, pl, focused);
+    }
+    if let Some(line) = layout.divider_line {
+        let color = if ui.divider_active {
+            theme.accent
+        } else {
+            theme.border
+        };
+        b.rect(line, color);
+    }
     draw_toolbar(&mut b, layout, ui);
-    draw_tab_bar(&mut b, ed, layout);
     let tooltip = ui
         .hover_button
+        .filter(|_| !ui.menu_open)
         .and_then(|i| toolbar_buttons(layout).into_iter().nth(i))
         .map(|btn| match keymap::shortcut_for(btn.cmd) {
             Some(keys) => format!("{} ({keys})", btn.cmd.description()),
@@ -124,9 +143,12 @@ pub fn build(
     draw_status_bar(&mut b, ed, layout, tooltip);
     draw_minibuffer(&mut b, ed, layout, cursor_on);
 
+    b.current = 1;
     if let Some(pl) = &layout.picker {
-        b.current = 1;
         draw_picker(&mut b, ed, layout, pl, cursor_on);
+    }
+    if ui.menu_open {
+        draw_file_menu(&mut b, layout, ui);
     }
 
     FrameData { layers: b.layers }
@@ -136,11 +158,11 @@ fn draw_toolbar(b: &mut Builder, l: &Layout, ui: UiState) {
     let theme = b.theme;
     b.rect(l.toolbar, theme.toolbar_bg);
     let text_y = l.toolbar.y + (l.toolbar.h - l.line_h) / 2.0;
-    let buttons = toolbar_buttons(l);
     let inset = (l.scale * 3.0).round();
-    for (i, btn) in buttons.iter().enumerate() {
+    for (i, btn) in toolbar_buttons(l).iter().enumerate() {
         let r = btn.rect;
-        let pressed = ui.pressed_button == Some(i);
+        let open_menu = ui.menu_open && btn.cmd == crate::commands::Command::FileMenu;
+        let pressed = ui.pressed_button == Some(i) || open_menu;
         let hovered = ui.hover_button == Some(i);
         let face = Rect::new(
             r.x + inset,
@@ -159,30 +181,67 @@ fn draw_toolbar(b: &mut Builder, l: &Layout, ui: UiState) {
         };
         let label_w = btn.label.width() as f32 * l.cell_w;
         b.label(
-            btn.label,
+            btn.label.clone(),
             r.x + (r.w - label_w) / 2.0,
             text_y,
             fg,
             l.toolbar,
         );
     }
-    // Separator between the file buttons and the rest.
-    if let Some(last_file) = buttons.get(3) {
-        let x = last_file.rect.right() + l.cell_w * 0.5;
-        b.rect(
-            Rect::new(
-                x,
-                l.toolbar.y + l.line_h * 0.3,
-                l.scale.max(1.0),
-                l.toolbar.h - l.line_h * 0.6,
-            ),
-            theme.border,
-        );
-    }
     b.rect(
         Rect::new(0.0, l.toolbar.bottom() - 1.0, l.width, 1.0),
         theme.border,
     );
+}
+
+fn draw_file_menu(b: &mut Builder, l: &Layout, ui: UiState) {
+    let theme = b.theme;
+    let menu = file_menu_layout(l);
+    let panel = menu.panel;
+    let border = l.scale.max(1.0).round();
+    let sh = (l.cell_w * 0.6).round();
+    b.rect(
+        Rect::new(panel.x + sh, panel.y + sh, panel.w, panel.h),
+        theme.shadow,
+    );
+    b.rect(
+        Rect::new(
+            panel.x - border,
+            panel.y - border,
+            panel.w + 2.0 * border,
+            panel.h + 2.0 * border,
+        ),
+        theme.overlay_border,
+    );
+    b.rect(panel, theme.overlay_bg);
+    let pad = l.cell_w * 1.5;
+    for (i, row) in menu.rows.iter().enumerate() {
+        let r = row.rect;
+        if row.cmd.is_none() {
+            let y = (r.y + r.h / 2.0).round();
+            b.rect(
+                Rect::new(r.x + l.cell_w, y, r.w - 2.0 * l.cell_w, 1.0),
+                theme.border,
+            );
+            continue;
+        }
+        let ty = r.y + (r.h - l.line_h) / 2.0;
+        let fg = if ui.menu_hover == Some(i) {
+            b.rect(r, theme.picker_selected);
+            b.rect(
+                Rect::new(r.x, r.y, (2.0 * l.scale).round().max(2.0), r.h),
+                theme.accent,
+            );
+            theme.tab_fg_active
+        } else {
+            theme.fg
+        };
+        b.label(row.label, r.x + pad, ty, fg, panel);
+        if !row.keys.is_empty() {
+            let kx = r.right() - pad - row.keys.width() as f32 * l.cell_w;
+            b.label(row.keys.clone(), kx, ty, theme.fg_dim, panel);
+        }
+    }
 }
 
 fn draw_picker(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PickerLayout, cursor_on: bool) {
@@ -304,38 +363,75 @@ fn draw_picker(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PickerLayout, curs
     }
 }
 
-fn draw_text_area(b: &mut Builder, ed: &Editor, l: &Layout, cursor_on: bool) {
+/// Centered hint shown in a view with no open tabs.
+fn draw_empty_pane(b: &mut Builder, l: &Layout, pl: &PaneLayout) {
+    let lines = [
+        "No file open",
+        "",
+        "Ctrl+O   open a file",
+        "Ctrl+N   new file",
+        "F1       help",
+        "F2       keyboard shortcuts",
+    ];
+    let w = lines.iter().map(|s| s.width()).max().unwrap_or(0) as f32 * l.cell_w;
+    let x = (pl.area.x + (pl.area.w - w) / 2.0).max(pl.area.x + l.cell_w);
+    let mut y = pl.text.y + (pl.text.h - lines.len() as f32 * l.line_h) / 3.0;
+    for (i, line) in lines.iter().enumerate() {
+        if !line.is_empty() {
+            let color = if i == 0 {
+                b.theme.statusbar_fg
+            } else {
+                b.theme.fg_dim
+            };
+            b.label(*line, x, y, color, pl.area);
+        }
+        y += l.line_h;
+    }
+}
+
+fn draw_text_area(
+    b: &mut Builder,
+    ed: &Editor,
+    l: &Layout,
+    pl: &PaneLayout,
+    focused: bool,
+    cursor_on: bool,
+) {
     let theme = b.theme;
-    let doc = ed.doc();
+    let Some(doc) = ed.panes[pl.pane].doc() else {
+        draw_empty_pane(b, l, pl);
+        return;
+    };
     let rope = &doc.rope;
     let tab = ed.config.tab_width;
     let (top, left) = (doc.view.top_line, doc.view.left_col);
     let cursor_line = rope.char_to_line(doc.selection.head);
     let (sel_s, sel_e) = doc.selection.range();
-    let query = ed.active_query();
-    let body = Rect::new(0.0, l.text.y, l.width, l.text.h);
+    // Find highlights belong to the focused document only.
+    let query = if focused { ed.active_query() } else { None };
+    let body = Rect::new(pl.area.x, pl.text.y, pl.area.w, pl.text.h);
 
-    b.rect(l.gutter, theme.gutter_bg);
+    b.rect(pl.gutter, theme.gutter_bg);
 
-    for row in 0..=l.rows {
+    for row in 0..=pl.rows {
         let line = top + row;
         if line >= rope.len_lines() {
             break;
         }
-        let y = l.text.y + row as f32 * l.line_h;
+        let y = pl.text.y + row as f32 * l.line_h;
         let ls = rope.line_to_char(line);
         let le = mv::line_content_end(rope, line);
         let col_x = |p: usize| -> f32 {
             let c = mv::width_of(rope.slice(ls..p), 0, tab) as f32 - left as f32;
-            l.text.x + c * l.cell_w
+            pl.text.x + c * l.cell_w
         };
 
-        if line == cursor_line {
+        if line == cursor_line && focused {
             b.rect(
                 Rect::new(
-                    l.text.x - l.cell_w * 0.5,
+                    pl.text.x - l.cell_w * 0.5,
                     y,
-                    l.text.w + l.cell_w * 0.5,
+                    pl.text.w + l.cell_w * 0.5,
                     l.line_h,
                 ),
                 theme.current_line,
@@ -346,8 +442,8 @@ fn draw_text_area(b: &mut Builder, ed: &Editor, l: &Layout, cursor_on: bool) {
             let text: std::borrow::Cow<str> = rope.slice(ls..le).into();
             for m in q.matches_in(&text) {
                 let (s, e) = (ls + m, ls + m + q.len());
-                let x0 = col_x(s).max(l.text.x);
-                let x1 = col_x(e);
+                let x0 = col_x(s).max(pl.text.x);
+                let x1 = col_x(e).min(pl.text.right());
                 let color = if (s, e) == (sel_s, sel_e) {
                     theme.find_match_active
                 } else {
@@ -361,35 +457,35 @@ fn draw_text_area(b: &mut Builder, ed: &Editor, l: &Layout, cursor_on: bool) {
         if sel_s < sel_e && sel_s <= le && sel_e > ls {
             let s = sel_s.max(ls);
             let e = sel_e.min(le);
-            let x0 = col_x(s).max(l.text.x);
+            let x0 = col_x(s).max(pl.text.x);
             let mut x1 = col_x(e);
             if sel_e > le && line + 1 < rope.len_lines() {
                 x1 += l.cell_w * 0.6;
             }
             b.rect(
-                Rect::new(x0, y, (x1 - x0).min(l.text.right() - x0), l.line_h),
+                Rect::new(x0, y, (x1 - x0).min(pl.text.right() - x0), l.line_h),
                 theme.selection,
             );
         }
 
         if ed.config.line_numbers {
-            let num = format!("{:>w$}", line + 1, w = l.gutter_digits);
-            let color = if line == cursor_line {
+            let num = format!("{:>w$}", line + 1, w = pl.gutter_digits);
+            let color = if line == cursor_line && focused {
                 theme.gutter_fg_active
             } else {
                 theme.gutter_fg
             };
-            b.label(num, l.gutter.x + l.cell_w, y, color, body);
+            b.label(num, pl.gutter.x + l.cell_w, y, color, body);
         }
 
-        let visible = display_slice(rope.line(line), left, l.cols + 2, tab);
+        let visible = display_slice(rope.line(line), left, pl.cols + 2, tab);
         if !visible.trim_end().is_empty() {
-            b.label(visible, l.text.x, y, theme.fg, l.text);
+            b.label(visible, pl.text.x, y, theme.fg, pl.text);
         }
 
-        if line == cursor_line && cursor_on && ed.minibuffer.is_none() {
+        if line == cursor_line && focused && cursor_on && ed.minibuffer.is_none() {
             let x = col_x(doc.selection.head);
-            if x >= l.text.x - 1.0 && x <= l.text.right() {
+            if x >= pl.text.x - 1.0 && x <= pl.text.right() {
                 let w = (2.0 * l.scale).round().max(2.0);
                 b.rect(Rect::new(x, y, w, l.line_h), theme.cursor);
             }
@@ -397,37 +493,43 @@ fn draw_text_area(b: &mut Builder, ed: &Editor, l: &Layout, cursor_on: bool) {
     }
 
     // Scrollbar.
-    let total = rope.len_lines() + l.rows.saturating_sub(1);
-    if rope.len_lines() > l.rows {
+    let total = rope.len_lines() + pl.rows.saturating_sub(1);
+    if rope.len_lines() > pl.rows {
         let w = (l.cell_w * 0.6).round();
-        let h = (l.rows as f32 / total as f32 * l.text.h).max(l.line_h);
-        let y = l.text.y + top as f32 / total as f32 * l.text.h;
-        b.rect(Rect::new(l.width - w, y, w, h), theme.scrollbar);
+        let h = (pl.rows as f32 / total as f32 * pl.text.h).max(l.line_h);
+        let y = pl.text.y + top as f32 / total as f32 * pl.text.h;
+        b.rect(Rect::new(pl.area.right() - w, y, w, h), theme.scrollbar);
     }
 }
 
-fn draw_tab_bar(b: &mut Builder, ed: &Editor, l: &Layout) {
+fn draw_tab_bar(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PaneLayout, focused: bool) {
     let theme = b.theme;
-    b.rect(l.tab_bar, theme.tabbar_bg);
-    let text_y = l.tab_bar.y + (l.tab_bar.h - l.line_h) / 2.0;
-    for t in tab_rects(ed, l) {
-        let active = t.index == ed.active;
+    let bar = pl.tab_bar;
+    b.rect(bar, theme.tabbar_bg);
+    let text_y = bar.y + (bar.h - l.line_h) / 2.0;
+    let active_index = ed.panes[pl.pane].active;
+    for t in tab_rects(ed, pl, l.scale) {
+        let active = t.index == active_index;
         if active {
             b.rect(t.rect, theme.tab_active_bg);
+            // Accent line marks the tab that has the cursor.
+            let mark = if focused { theme.accent } else { theme.border };
             b.rect(
                 Rect::new(t.rect.x, t.rect.y, t.rect.w, (2.0 * l.scale).round()),
-                theme.accent,
+                mark,
             );
         }
-        let color = if active {
+        let color = if active && focused {
             theme.tab_fg_active
+        } else if active {
+            theme.statusbar_fg
         } else {
             theme.tab_fg
         };
-        b.label(format!("  {}", t.title), t.rect.x, text_y, color, l.tab_bar);
+        b.label(format!("  {}", t.title), t.rect.x, text_y, color, bar);
         if t.dirty {
             let x = t.rect.x + (t.title.width() + 3) as f32 * l.cell_w;
-            b.label("●", x, text_y, theme.modified, l.tab_bar);
+            b.label("●", x, text_y, theme.modified, bar);
         }
         b.rect(
             Rect::new(
@@ -440,23 +542,23 @@ fn draw_tab_bar(b: &mut Builder, ed: &Editor, l: &Layout) {
         );
     }
     b.rect(
-        Rect::new(0.0, l.tab_bar.bottom() - 1.0, l.width, 1.0),
+        Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0),
         theme.border,
     );
 }
 
-fn mode_label(ed: &Editor) -> &'static str {
+pub fn mode_label(ed: &Editor) -> &'static str {
     if ed.picker.is_some() {
         return "PICK";
     }
     match ed.minibuffer.as_ref().map(|m| &m.kind) {
-        None if ed.doc().read_only => "VIEW",
+        None if ed.has_doc() && ed.doc().read_only => "VIEW",
         None => "EDIT",
         Some(PromptKind::Open) => "OPEN",
         Some(PromptKind::SaveAs(_)) => "SAVE",
         Some(PromptKind::Find { .. }) => "FIND",
         Some(PromptKind::GotoLine) => "GOTO",
-        Some(PromptKind::ConfirmClose(_) | PromptKind::ConfirmQuit) => "CONFIRM",
+        Some(PromptKind::ConfirmClose { .. } | PromptKind::ConfirmQuit) => "CONFIRM",
     }
 }
 
@@ -466,7 +568,7 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
     b.rect(r, theme.statusbar_bg);
     b.rect(Rect::new(0.0, r.y, l.width, 1.0), theme.border);
     let y = r.y + (r.h - l.line_h) / 2.0;
-    let doc = ed.doc();
+    let doc = ed.pane().doc();
 
     // Mode chip, vim style.
     let mode = format!(" {} ", mode_label(ed));
@@ -475,21 +577,23 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
     b.label(mode, 0.0, y, theme.accent_fg, r);
 
     // Right side: selection, position, indent, encoding, line ending.
-    let head = doc.selection.head;
-    let line = doc.rope.char_to_line(head);
-    let col = mv::col_of(&doc.rope, head, ed.config.tab_width);
     let mut right = String::new();
-    if !doc.selection.is_empty() {
-        let (s, e) = doc.selection.range();
-        right.push_str(&format!("({} selected)  ", e - s));
+    if let Some(doc) = doc {
+        let head = doc.selection.head;
+        let line = doc.rope.char_to_line(head);
+        let col = mv::col_of(&doc.rope, head, ed.config.tab_width);
+        if !doc.selection.is_empty() {
+            let (s, e) = doc.selection.range();
+            right.push_str(&format!("({} selected)  ", e - s));
+        }
+        right.push_str(&format!(
+            "Ln {}, Col {}  {}  UTF-8  {} ",
+            line + 1,
+            col + 1,
+            doc.indent.label(),
+            doc.line_ending.label()
+        ));
     }
-    right.push_str(&format!(
-        "Ln {}, Col {}  {}  UTF-8  {} ",
-        line + 1,
-        col + 1,
-        doc.indent.label(),
-        doc.line_ending.label()
-    ));
     let right_w = right.width() as f32 * l.cell_w;
     let right_x = l.width - right_w - l.cell_w;
     b.label(right, right_x, y, theme.statusbar_fg, r);
@@ -503,13 +607,16 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
         avail_cols
     }
     .saturating_sub(5);
-    let name = match &doc.path {
-        Some(p) => truncate_left(&shorten_home(&p.display().to_string()), budget),
-        None => doc.title(),
+    let name = match doc {
+        Some(d) => match &d.path {
+            Some(p) => truncate_left(&shorten_home(&p.display().to_string()), budget),
+            None => d.title(),
+        },
+        None => "No file".to_string(),
     };
     b.label(name.clone(), x, y, theme.statusbar_fg, r);
     x += name.width() as f32 * l.cell_w;
-    if doc.is_dirty() {
+    if doc.is_some_and(|d| d.is_dirty()) {
         b.label(" [+]", x, y, theme.modified, r);
         x += 4.0 * l.cell_w;
     }

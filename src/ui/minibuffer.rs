@@ -20,8 +20,11 @@ pub enum PromptKind {
         origin: usize,
     },
     GotoLine,
-    /// Unsaved changes in the document at this index: (y)es save / (n)o discard / (c)ancel.
-    ConfirmClose(usize),
+    /// Unsaved changes in tab `index` of view `pane`: (y)es save / (n)o discard / (c)ancel.
+    ConfirmClose {
+        pane: usize,
+        index: usize,
+    },
     /// Unsaved changes in some documents: (s)ave all / (d)iscard / (c)ancel.
     ConfirmQuit,
 }
@@ -47,7 +50,7 @@ impl Minibuffer {
     pub fn is_confirm(&self) -> bool {
         matches!(
             self.kind,
-            PromptKind::ConfirmClose(_) | PromptKind::ConfirmQuit
+            PromptKind::ConfirmClose { .. } | PromptKind::ConfirmQuit
         )
     }
 
@@ -57,7 +60,7 @@ impl Minibuffer {
             PromptKind::SaveAs(_) => "Save as: ".into(),
             PromptKind::Find { .. } => "Find: ".into(),
             PromptKind::GotoLine => "Go to line[:col]: ".into(),
-            PromptKind::ConfirmClose(_) => {
+            PromptKind::ConfirmClose { .. } => {
                 format!("Save changes to {doc_title}? (y)es / (n)o / (c)ancel ")
             }
             PromptKind::ConfirmQuit => {

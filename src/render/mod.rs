@@ -29,19 +29,35 @@ impl Renderer {
         event_loop: &ActiveEventLoop,
         fonts: &[&str],
     ) -> Result<Self> {
-        let gpu = Gpu::new(window, event_loop).await?;
-        let format = gpu.config.format;
+        Ok(Self::with_gpu(Gpu::new(window, event_loop).await?, fonts))
+    }
+
+    /// Renderer drawing into an offscreen texture (headless mode).
+    pub async fn new_offscreen(
+        width: u32,
+        height: u32,
+        software: bool,
+        fonts: &[&str],
+    ) -> Result<Self> {
+        Ok(Self::with_gpu(
+            Gpu::new_offscreen(width, height, software).await?,
+            fonts,
+        ))
+    }
+
+    fn with_gpu(gpu: Gpu, fonts: &[&str]) -> Self {
+        let format = gpu.format;
         let quads = [
             QuadRenderer::new(&gpu.device, format),
             QuadRenderer::new(&gpu.device, format),
         ];
         let text = TextSystem::new(&gpu.device, &gpu.queue, format, fonts);
-        Ok(Self {
+        Self {
             gpu,
             quads,
             text,
             linear: format.is_srgb(),
-        })
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -50,10 +66,17 @@ impl Renderer {
 
     /// Returns false if the frame was skipped and should be retried.
     pub fn draw(&mut self, frame: &FrameData) -> bool {
-        let Frame::Ready(surface_tex) = self.gpu.acquire() else {
-            return false;
+        let (surface_tex, view) = match self.gpu.acquire() {
+            Frame::Surface(tex) => {
+                let view = tex
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                (Some(tex), view)
+            }
+            Frame::Offscreen(view) => (None, view),
+            Frame::Skip => return false,
         };
-        let (w, h) = (self.gpu.config.width, self.gpu.config.height);
+        let (w, h) = (self.gpu.width, self.gpu.height);
         let Gpu { device, queue, .. } = &self.gpu;
         for (quads, layer) in self.quads.iter_mut().zip(&frame.layers) {
             quads.prepare(device, queue, w as f32, h as f32, &layer.quads);
@@ -63,9 +86,6 @@ impl Renderer {
             log::error!("text prepare failed: {e}");
         }
 
-        let view = surface_tex
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
         });
@@ -95,7 +115,9 @@ impl Renderer {
             }
         }
         queue.submit(Some(encoder.finish()));
-        queue.present(surface_tex);
+        if let Some(tex) = surface_tex {
+            queue.present(tex);
+        }
         self.text.trim();
         true
     }
