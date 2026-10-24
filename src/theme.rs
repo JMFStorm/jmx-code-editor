@@ -73,6 +73,8 @@ pub struct Theme {
     pub current_line: Rgba,
     pub selection: Rgba,
     pub find_match: Rgba,
+    /// The line of a place a list just showed (References, Problems, F4).
+    pub located_line: Rgba,
     pub find_match_active: Rgba,
     pub cursor: Rgba,
     pub accent: Rgba,
@@ -112,6 +114,7 @@ pub const DARK: Theme = Theme {
     current_line: hex(0x1c1f26),
     selection: hex(0x264f78),
     find_match: hexa(0xe5c07b, 70),
+    located_line: hexa(0x61afef, 40),
     find_match_active: hexa(0xe5c07b, 150),
     cursor: hex(0x61afef),
     accent: hex(0x61afef),

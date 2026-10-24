@@ -40,6 +40,8 @@ pub struct SymbolState {
     /// The .NET API docs of the workspace's C# projects (loaded in the background).
     pub dotnet: Option<Arc<DotnetDocs>>,
     dotnet_job: Option<Receiver<DotnetDocs>>,
+    /// npm packages' parsed declaration files.
+    pub dts: RefCell<crate::symbols::npm::DtsCache>,
     /// A C# project's implicit global usings.
     scopes: RefCell<HashMap<PathBuf, Scope>>,
     /// The Docs page: the API shown, the ones shown before it, other matches of the name
@@ -57,7 +59,13 @@ pub enum External {
     Dotnet { idx: u32, full: String, url: String },
     /// A JavaScript built-in's MDN page.
     Web(WebDoc),
-    /// Imported from a package (not indexed).
+    /// Declared in an npm package's type definitions (`path` is the `.d.ts` file); `see`:
+    /// the docs page it links.
+    Npm {
+        package: String,
+        see: Option<String>,
+    },
+    /// Imported from a package that has no type definitions for it.
     Package(String),
 }
 
@@ -78,6 +86,8 @@ enum Qual {
     Member(String),
     /// `new Name`
     New,
+    /// `import('./models').Name` (a JSDoc type).
+    ImportType(String),
 }
 
 /// Words that are never looked up.
@@ -199,6 +209,18 @@ fn qualifier(rope: &Rope, start: usize) -> Qual {
         if q > 0 && rope.char(q - 1) == '?' {
             q -= 1;
         }
+        // `import('./models').User` in a JSDoc type.
+        if q > 0 && rope.char(q - 1) == ')' {
+            let line = rope.char_to_line(q);
+            let before: String = rope.slice(rope.line_to_char(line)..q).chars().collect();
+            if let Some(k) = before.rfind("import(") {
+                let inner = before[k + "import(".len()..].trim_end_matches(')').trim();
+                let spec = inner.trim_matches(|c| c == '\'' || c == '"');
+                if !spec.is_empty() && spec.len() + 2 == inner.len() {
+                    return Qual::ImportType(spec.to_string());
+                }
+            }
+        }
         // `foo().bar` / `a[0].b`: no name to go by.
         let end = q;
         let mut s = end;
@@ -233,6 +255,7 @@ impl Editor {
     pub(super) fn start_symbols(&mut self) {
         self.symbols.index.borrow_mut().clear();
         self.symbols.live.borrow_mut().clear();
+        self.symbols.dts.borrow_mut().clear();
         self.symbols.scans.clear();
         let folders: Vec<PathBuf> = self
             .workspace
@@ -245,7 +268,7 @@ impl Editor {
         self.load_dotnet_docs(&folders);
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
-            .name("jmx-symbols".into())
+            .name("jdc-symbols".into())
             .spawn(move || {
                 let started = Instant::now();
                 let mut out = Vec::new();
@@ -292,7 +315,7 @@ impl Editor {
         }
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
-            .name("jmx-dotnet-docs".into())
+            .name("jdc-dotnet-docs".into())
             .spawn(move || {
                 let started = Instant::now();
                 let root = dotnet_docs::dotnet_root();
@@ -425,7 +448,11 @@ impl Editor {
         }
         let qual = qualifier(&doc.rope, start);
         self.sync_live_symbols();
-        let mut found = self.resolve(&path, family, &name, &qual);
+        let mut found = match &qual {
+            Qual::ImportType(spec) => self.import_type(&path, spec, &name),
+            _ => self.resolve(&path, family, &name, &qual),
+        };
+        found = self.follow_aliases(found);
         if found.is_empty() {
             let line = doc.rope.char_to_line(start);
             found = self.external(&path, family, &doc.rope, &name, &qual, line);
@@ -464,6 +491,7 @@ impl Editor {
                     Qual::New => Recv::New,
                     Qual::Member(o) if o == "this" || o == "base" => Recv::None,
                     Qual::Member(o) => Recv::Of(o),
+                    Qual::ImportType(_) => Recv::None,
                 };
                 // Best first: members of the enclosing class's base types (a controller's
                 // `Ok()`), then of namespaces this file imports itself.
@@ -493,13 +521,42 @@ impl Editor {
             }
             Family::Js => {
                 if *qual == Qual::Plain
-                    && let Some((_, pkg)) = self
+                    && let Some((_, imported, pkg)) = self
                         .symbols
                         .index
                         .borrow()
                         .file(path)
-                        .and_then(|f| f.packages.iter().find(|(l, _)| l == name).cloned())
+                        .and_then(|f| f.packages.iter().find(|(l, _, _)| l == name).cloned())
                 {
+                    // The package's own type definitions in node_modules.
+                    let want = imported.unwrap_or_else(|| "default".into());
+                    let found = crate::symbols::npm::package_types(path, &pkg)
+                        .map(|entry| {
+                            crate::symbols::npm::find_export(
+                                &mut self.symbols.dts.borrow_mut(),
+                                &entry,
+                                &want,
+                            )
+                        })
+                        .unwrap_or_default();
+                    if !found.is_empty() {
+                        return found
+                            .into_iter()
+                            .map(|(p, sym)| Found {
+                                path: p,
+                                ext: Some(External::Npm {
+                                    package: pkg.clone(),
+                                    see: sym
+                                        .doc
+                                        .see
+                                        .iter()
+                                        .find(|s| s.starts_with("https://"))
+                                        .cloned(),
+                                }),
+                                sym,
+                            })
+                            .collect();
+                    }
                     let mut sym = module_symbol(Path::new(name));
                     sym.signature = name.to_string();
                     return vec![Found {
@@ -546,6 +603,67 @@ impl Editor {
             .unwrap_or_default()
     }
 
+    /// `import('<spec>').Name` in a JSDoc type: `Name` in that file.
+    fn import_type(&self, path: &Path, spec: &str, name: &str) -> Vec<Found> {
+        match symbols::js::resolve_import(path, spec) {
+            Some(file) => self.import_type_at(&file, name),
+            None => Vec::new(),
+        }
+    }
+
+    /// Type aliases (`@typedef {import('./models').User} User`) replaced by what they name.
+    fn follow_aliases(&self, found: Vec<Found>) -> Vec<Found> {
+        let mut out = Vec::new();
+        for f in found {
+            let alias = (f.ext.is_none() && f.sym.kind == Kind::Type)
+                .then(|| {
+                    self.symbols.index.borrow().file(&f.path).and_then(|file| {
+                        file.aliases
+                            .iter()
+                            .find(|(n, _, _)| *n == f.sym.name)
+                            .map(|(_, target, x)| (target.clone(), x.clone()))
+                    })
+                })
+                .flatten();
+            if let Some((target, x)) = alias {
+                let to = self.import_type_at(&target, &x);
+                if !to.is_empty() {
+                    for t in to {
+                        if !out.contains(&t) {
+                            out.push(t);
+                        }
+                    }
+                    continue;
+                }
+            }
+            if !out.contains(&f) {
+                out.push(f);
+            }
+        }
+        out
+    }
+
+    /// The top-level symbols called `name` in `file` (loaded on demand).
+    fn import_type_at(&self, file: &Path, name: &str) -> Vec<Found> {
+        if self.symbols.index.borrow().file(file).is_none() {
+            self.load_symbols(file);
+        }
+        let ix = self.symbols.index.borrow();
+        ix.file(file)
+            .map(|f| {
+                f.symbols
+                    .iter()
+                    .filter(|s| s.name == name && s.container.is_none())
+                    .map(|s| Found {
+                        path: file.to_path_buf(),
+                        sym: s.clone(),
+                        ext: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The global usings of the C# project `path` belongs to (cached).
     fn cs_scope(&self, path: &Path) -> Scope {
         let Some(csproj) = crate::lint::roslyn::project_of(path) else {
@@ -574,7 +692,8 @@ impl Editor {
         let ix = self.symbols.index.borrow();
         let all: Vec<(&Path, &Symbol)> = ix
             .named(name)
-            .filter(|(p, _)| symbols::family(p) == Some(family))
+            // Package files (an open `.d.ts` in node_modules) are reached through their package.
+            .filter(|(p, _)| symbols::family(p) == Some(family) && !in_node_modules(p))
             .collect();
         let found = |list: Vec<(&Path, &Symbol)>| -> Vec<Found> {
             let mut list = list;
@@ -592,6 +711,8 @@ impl Editor {
             all.iter().copied().filter(|(p, s)| pred(p, s)).collect()
         };
         match qual {
+            // Resolved by `import_type` before.
+            Qual::ImportType(_) => Vec::new(),
             Qual::Member(obj) => {
                 let members = pick(&|_, s| s.container.is_some());
                 let of_type = pick(&|_, s| s.container.as_deref() == Some(obj.as_str()));
@@ -765,6 +886,22 @@ impl Editor {
             };
             lines.push((format!("→ {ty}{sep}{text}"), HoverKind::Text));
         }
+        // An interface's members (TypeScript declarations).
+        if s.kind == Kind::Interface && !s.params.is_empty() {
+            lines.push((String::new(), HoverKind::Text));
+            for m in s.params.iter().take(12) {
+                lines.push((format!("  {m}"), HoverKind::Code));
+            }
+            if s.params.len() > 12 {
+                lines.push((format!("  … {} more", s.params.len() - 12), HoverKind::Dim));
+            }
+        }
+        if !doc.example.is_empty() {
+            lines.push((String::new(), HoverKind::Text));
+            for l in doc.example.lines().take(8) {
+                lines.push((format!("  {l}"), HoverKind::Code));
+            }
+        }
         let place = match &f.ext {
             None => format!(
                 "{} · {}:{}",
@@ -778,7 +915,23 @@ impl Editor {
             Some(External::Web(_)) => {
                 "MDN · F12 opens the page in your browser (asks first)".into()
             }
-            Some(External::Package(pkg)) => format!("from package `{pkg}` (not indexed)"),
+            Some(External::Npm { package, see }) => {
+                let file = f.path.to_string_lossy().replace('\\', "/");
+                let file = file
+                    .rsplit("node_modules/")
+                    .next()
+                    .unwrap_or(&file)
+                    .to_string();
+                let web = if see.is_some() {
+                    " · Ctrl+F12: docs site"
+                } else {
+                    ""
+                };
+                format!("{package} · {file}:{} · F12: declaration{web}", s.line + 1)
+            }
+            Some(External::Package(pkg)) => {
+                format!("from package `{pkg}` (no type definitions found for it)")
+            }
         };
         lines.push((place, HoverKind::Dim));
         if more > 0 {
@@ -794,7 +947,12 @@ impl Editor {
     pub(super) fn symbol_hover(&self, pane: usize, pos: usize) -> Option<Vec<(String, HoverKind)>> {
         let (_, found) = self.resolve_at(pane, pos)?;
         let first = found.first()?;
-        Some(self.symbol_lines(first, found.len() - 1, None))
+        // npm overloads: F12 goes to the documented one, so they aren't counted.
+        let more = match first.ext {
+            Some(External::Npm { .. }) => 0,
+            _ => found.len() - 1,
+        };
+        Some(self.symbol_lines(first, more, None))
     }
 
     // ------------------------------------------------------------ parameter hints
@@ -864,11 +1022,16 @@ impl Editor {
             self.info(format!("No definition found for `{name}`{loading}"));
             return;
         }
+        let mut found = found;
         match &found[0].ext {
             Some(External::Package(pkg)) => {
-                self.info(format!("`{name}` comes from package `{pkg}` (not indexed)"));
+                self.info(format!(
+                    "`{name}` comes from package `{pkg}`, which has no type definitions for it"
+                ));
                 return;
             }
+            // npm: the declaration in the package's types (the documented overload).
+            Some(External::Npm { .. }) => found.truncate(1),
             Some(External::Web(w)) => {
                 self.confirm_open_url(w.url.clone(), format!("the MDN page for {}", w.title));
                 return;
@@ -886,35 +1049,61 @@ impl Editor {
             }
             None => {}
         }
+        // On the declaration itself: go to what it implements (interface / base member), or
+        // to its implementations.
+        let mut found: Vec<(Found, &'static str)> = found.into_iter().map(|f| (f, "")).collect();
+        if let Some(here) = self.declaration_at_cursor(found.iter().map(|(f, _)| f)) {
+            found = self.related_members(&here);
+            if found.is_empty() {
+                self.info(format!(
+                    "`{name}` is declared here; it implements nothing in the workspace \
+                     (Shift+F12 lists its references)"
+                ));
+                return;
+            }
+        }
         if let Some(here) = self.cursor_target() {
             self.symbols.back.push(here);
             if self.symbols.back.len() > MAX_BACK {
                 self.symbols.back.remove(0);
             }
         }
-        if let [f] = found.as_slice() {
+        if let [(f, role)] = found.as_slice() {
             let t = Target {
                 path: f.path.clone(),
                 line: f.sym.line,
                 col: f.sym.col,
             };
             self.show_location(&t, true);
-            self.info(format!("{} {}", f.sym.kind.name(), f.sym.name));
+            let what = match &f.sym.container {
+                Some(c) => format!("{c}.{}", f.sym.name),
+                None => f.sym.name.clone(),
+            };
+            let role = if role.is_empty() {
+                f.sym.kind.name()
+            } else {
+                role
+            };
+            self.info(format!("{role} {what}"));
             return;
         }
         let items = found
             .iter()
-            .map(|f| {
+            .map(|(f, role)| {
                 let what = match &f.sym.container {
                     Some(c) => format!("{c}.{}", f.sym.name),
                     None => f.sym.name.clone(),
                 };
+                let role = if role.is_empty() {
+                    f.sym.kind.name()
+                } else {
+                    role
+                };
                 (
                     format!(
-                        "{what}  {}:{}  ({})",
+                        "{what}  {}:{}  ({role})",
                         self.display_path(&f.path),
                         f.sym.line + 1,
-                        f.sym.kind.name()
                     ),
                     f.path.clone(),
                     f.sym.line + 1,
@@ -923,6 +1112,107 @@ impl Editor {
             })
             .collect();
         self.picker = Some(FilePicker::definitions(&name, items));
+    }
+
+    /// The candidate that is the declaration under the editor cursor (its name starts there).
+    fn declaration_at_cursor<'a>(
+        &self,
+        mut found: impl Iterator<Item = &'a Found>,
+    ) -> Option<Found> {
+        let doc = self.panes[EDITOR].doc()?;
+        let path = doc.canonical.as_ref()?;
+        let (start, _, _) = word_at(&doc.rope, doc.selection.head)?;
+        let line = doc.rope.char_to_line(start);
+        let col = start - doc.rope.line_to_char(line);
+        found
+            .find(|f| f.ext.is_none() && &f.path == path && f.sym.line == line && f.sym.col == col)
+            .cloned()
+    }
+
+    /// What a declaration implements (members of its class's declared bases, or the bases
+    /// themselves for a type) and what implements it (the same members of classes that list
+    /// its type as a base, or those classes), with their role.
+    fn related_members(&self, decl: &Found) -> Vec<(Found, &'static str)> {
+        let ix = self.symbols.index.borrow();
+        let family = symbols::family(&decl.path);
+        let is_type = matches!(decl.sym.kind, Kind::Class | Kind::Interface);
+        let owner = if is_type {
+            decl.sym.name.clone()
+        } else {
+            match &decl.sym.container {
+                Some(c) => c.clone(),
+                None => return Vec::new(),
+            }
+        };
+        let types = |p: &Path| -> Vec<Symbol> {
+            ix.file(p)
+                .map(|f| {
+                    f.symbols
+                        .iter()
+                        .filter(|s| matches!(s.kind, Kind::Class | Kind::Interface))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let bases = types(&decl.path)
+            .iter()
+            .find(|s| s.name == owner)
+            .map(|s| base_names(&s.signature))
+            .unwrap_or_default();
+        // Types (anywhere in the workspace) that list `owner` as a base.
+        let implementers: Vec<String> = ix
+            .paths()
+            .filter(|p| symbols::family(p) == family)
+            .flat_map(|p| types(p))
+            .filter(|s| base_names(&s.signature).contains(&owner))
+            .map(|s| s.name)
+            .collect();
+        let same_member =
+            |s: &Symbol| s.kind == decl.sym.kind && s.params.len() == decl.sym.params.len();
+        let mut out: Vec<(Found, &'static str)> = Vec::new();
+        let mut add = |p: &Path, s: &Symbol, role: &'static str| {
+            let f = Found {
+                path: p.to_path_buf(),
+                sym: s.clone(),
+                ext: None,
+            };
+            if f != *decl && !out.iter().any(|(o, _)| *o == f) {
+                out.push((f, role));
+            }
+        };
+        if is_type {
+            for b in &bases {
+                for (p, s) in ix.named(b) {
+                    if symbols::family(p) == family
+                        && matches!(s.kind, Kind::Class | Kind::Interface)
+                    {
+                        add(p, s, s.kind.name());
+                    }
+                }
+            }
+            for i in &implementers {
+                for (p, s) in ix.named(i) {
+                    if symbols::family(p) == family
+                        && matches!(s.kind, Kind::Class | Kind::Interface)
+                    {
+                        add(p, s, "implementation");
+                    }
+                }
+            }
+        } else {
+            for (p, s) in ix.named(&decl.sym.name) {
+                if symbols::family(p) != family || !same_member(s) {
+                    continue;
+                }
+                match &s.container {
+                    Some(c) if bases.contains(c) => add(p, s, s.kind.name()),
+                    Some(c) if implementers.contains(c) => add(p, s, "implementation"),
+                    _ => {}
+                }
+            }
+        }
+        out
     }
 
     /// Ctrl+F12: the web page of the name at the cursor (Microsoft Learn / MDN), or of the
@@ -952,6 +1242,13 @@ impl Editor {
             Some(External::Web(w)) => {
                 self.confirm_open_url(w.url, format!("the MDN page for {}", w.title))
             }
+            Some(External::Npm {
+                see: Some(url),
+                package,
+            }) => self.confirm_open_url(url, format!("the {package} docs for `{name}`")),
+            Some(External::Npm { package, .. }) => self.info(format!(
+                "No web page known for `{name}` (its {package} declaration links none)"
+            )),
             Some(External::Package(pkg)) => self.info(format!(
                 "`{name}` comes from package `{pkg}` (no web page known)"
             )),
@@ -1055,6 +1352,11 @@ fn dotnet_found(d: &DotnetDocs, idx: u32, recv: Recv) -> Found {
             url: dotnet_docs::learn_url(d.id(idx)).unwrap_or_default(),
         }),
     }
+}
+
+/// A file inside a `node_modules` folder.
+pub(super) fn in_node_modules(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == "node_modules")
 }
 
 fn entry_too_big(path: &Path) -> bool {
@@ -1179,7 +1481,7 @@ mod tests {
     /// A small project: `format.js` documents `formatCurrency`, `app.js` imports and calls
     /// it; `Store` has a method `save`; C# `Svc` implements a documented interface.
     fn project(name: &str) -> (Editor, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("jmx-sym-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-sym-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -1321,6 +1623,143 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn f12_on_a_declaration_goes_between_interface_and_implementations() {
+        let (mut ed, dir) = project("impl");
+        std::fs::write(
+            dir.join("Svc2.cs"),
+            "public class Svc2 : ISvc {\n    public Item Find(int id) => null;\n}\n",
+        )
+        .unwrap();
+        ed.symbols_file_changed(&dir.join("Svc2.cs"), false);
+        ed.open_path(&dir.join("Svc.cs"));
+        let line_of = |ed: &Editor| ed.doc().rope.char_to_line(ed.doc().selection.head);
+        // On `Svc.Find`'s declaration: up to `ISvc.Find`.
+        put_cursor(&mut ed, "Find(int id) =>", 0);
+        ed.execute(Command::GoToDefinition);
+        assert!(ed.picker.is_none());
+        assert_eq!(line_of(&ed), 2, "ISvc.Find");
+        assert!(ed.message.as_ref().unwrap().text.contains("ISvc.Find"));
+        // On `ISvc.Find`: both implementations, in the picker.
+        ed.execute(Command::GoToDefinition);
+        let p = ed.picker.as_ref().expect("picker");
+        assert_eq!(p.len(), 2);
+        assert!(p.entries().all(|e| e.name.contains("(implementation)")));
+        ed.execute(Command::Cancel);
+        // A member that implements nothing.
+        put_cursor(&mut ed, "Use()", 0);
+        ed.execute(Command::GoToDefinition);
+        assert!(
+            ed.message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("implements nothing")
+        );
+        // The class: up to the interface.
+        put_cursor(&mut ed, "Svc : ISvc", 0);
+        ed.execute(Command::GoToDefinition);
+        assert_eq!(line_of(&ed), 0);
+        assert!(ed.doc().rope.line(0).to_string().contains("interface ISvc"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn npm_package_docs_and_jsdoc_types() {
+        let dir = std::env::temp_dir().join(format!("jdc-sym-npm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let w = |rel: &str, text: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        w("package.json", "{}");
+        w(
+            "node_modules/vue/package.json",
+            r#"{"types": "dist/vue.d.ts"}"#,
+        );
+        w(
+            "node_modules/vue/dist/vue.d.ts",
+            "/**\n * Takes a getter function and returns a readonly reactive ref object.\n *\n * @param getter - Function that produces the next value.\n * @example\n * ```js\n * const plusOne = computed(() => count.value + 1)\n * ```\n * @see {@link https://vuejs.org/api/reactivity-core.html#computed}\n */\nexport declare function computed<T>(getter: () => T): ComputedRef<T>;\n",
+        );
+        w(
+            "types/models.d.ts",
+            "/** A person using the app. */\nexport interface User {\n  id: number;\n  name: string;\n  /** ISO date */\n  joinedAt: string;\n}\nexport type Role = 'admin' | 'viewer';\n",
+        );
+        w(
+            "src/App.vue",
+            "<script setup>\nimport { computed } from 'vue';\n/**\n * @typedef {import('../types/models').User} User\n */\n/** @type {ReturnType<typeof load<User[]>>} */\nconst users = load();\nconst n = computed(() => 1);\n/** @type {import('../types/models').Role} */\nconst role = 'admin';\n</script>\n",
+        );
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let app = dir.join("src/App.vue");
+        let mut ed = Editor::new(Config::default(), std::slice::from_ref(&app));
+        // Hover on `computed(`: the package's own docs, with the example.
+        put_cursor(&mut ed, "computed(() => 1", 2);
+        let head = ed.doc().selection.head;
+        let lines = ed.symbol_hover(EDITOR, head).unwrap();
+        assert!(
+            lines[0]
+                .0
+                .starts_with("computed<T>(getter: () => T): ComputedRef<T>"),
+            "{lines:?}"
+        );
+        assert!(lines[1].0.starts_with("Takes a getter function"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.0 == "  const plusOne = computed(() => count.value + 1)")
+        );
+        let place = &lines.last().unwrap().0;
+        assert!(
+            place.starts_with("vue · vue/dist/vue.d.ts:11 · F12: declaration · Ctrl+F12"),
+            "{place}"
+        );
+        // Parameter hints come from the declaration too (cursor inside the call).
+        put_cursor(&mut ed, "computed(() => 1", 9);
+        ed.execute(Command::SignatureHelp);
+        assert_eq!(
+            ed.symbols.signature.as_ref().unwrap().lines[1].0,
+            "▸ getter: () => T — Function that produces the next value."
+        );
+        ed.execute(Command::Cancel);
+        // Ctrl+F12: the @see page, after asking.
+        put_cursor(&mut ed, "computed(() => 1", 2);
+        ed.execute(Command::OpenDocsInBrowser);
+        ed.insert_text("y");
+        assert_eq!(
+            ed.opened_url.as_deref(),
+            Some("https://vuejs.org/api/reactivity-core.html#computed")
+        );
+        // F12: the declaration in node_modules.
+        ed.execute(Command::GoToDefinition);
+        assert_eq!(
+            ed.doc().canonical,
+            Some(dir.join("node_modules/vue/dist/vue.d.ts"))
+        );
+        assert_eq!(ed.doc().rope.char_to_line(ed.doc().selection.head), 10);
+        ed.execute(Command::GoBack);
+        // `User` inside a JSDoc type: through the typedef, to the interface.
+        put_cursor(&mut ed, "User[]", 0);
+        let head = ed.doc().selection.head;
+        let lines = ed.symbol_hover(EDITOR, head).unwrap();
+        assert_eq!(lines[0].0, "interface User");
+        assert_eq!(lines[1].0, "A person using the app.");
+        assert!(
+            lines.iter().any(|l| l.0 == "  joinedAt: string"),
+            "{lines:?}"
+        );
+        ed.execute(Command::GoToDefinition);
+        assert_eq!(ed.doc().canonical, Some(dir.join("types/models.d.ts")));
+        assert_eq!(ed.doc().rope.char_to_line(ed.doc().selection.head), 1);
+        ed.execute(Command::GoBack);
+        // `import('…').Role` in a comment.
+        put_cursor(&mut ed, "Role}", 0);
+        ed.execute(Command::GoToDefinition);
+        assert_eq!(ed.doc().canonical, Some(dir.join("types/models.d.ts")));
+        assert_eq!(ed.doc().rope.char_to_line(ed.doc().selection.head), 7);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     const FAKE_XML: &str = r#"<?xml version="1.0"?>
 <doc><members>
     <member name="T:System.ComponentModel.DataAnnotations.RequiredAttribute">
@@ -1350,7 +1789,7 @@ mod tests {
 
     #[test]
     fn dotnet_names_show_sdk_docs_and_offer_learn() {
-        let dir = std::env::temp_dir().join(format!("jmx-sym-net-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-sym-net-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -1435,7 +1874,7 @@ mod tests {
 
     #[test]
     fn js_built_ins_link_to_mdn_and_packages_are_named() {
-        let dir = std::env::temp_dir().join(format!("jmx-sym-mdn-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-sym-mdn-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();

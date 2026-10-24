@@ -24,7 +24,10 @@ pub fn lex(lx: &mut Lexer) {
     let first = chars.iter().position(|c| !c.is_whitespace()).unwrap_or(end);
     // `name — text`: the part before the dash.
     let dash = text.find(" — ").map(|b| text[..b].chars().count());
-    if chars[0] == '·' {
+    if chars.get(first) == Some(&'│') {
+        // A box line: its bar.
+        lx.push(first, first + 1, Token::Comment);
+    } else if chars[0] == '·' {
         lx.push(0, end, Token::Comment);
     } else if SECTIONS.iter().any(|s| text.starts_with(s)) {
         lx.push(0, end, Token::Type);

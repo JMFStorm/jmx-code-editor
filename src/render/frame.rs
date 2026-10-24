@@ -940,28 +940,22 @@ fn draw_text_area(
         .unwrap_or_default();
     // Find highlights belong to the focused document only.
     let query = if focused { ed.active_query() } else { None };
+    // A place a list showed in the editor view.
+    let located = (pl.pane == crate::editor::EDITOR)
+        .then(|| ed.located_in(doc))
+        .flatten();
     let body = Rect::new(pl.area.x, pl.text.y, pl.area.w, pl.text.h);
 
     b.rect(pl.gutter, theme.gutter_bg);
 
-    // The failure box under the selected test on the Tests page, and the message box under
-    // the selected problem on the Problems page (its left bar in the severity color).
-    let detail_box = match doc.syntax.lang {
-        crate::syntax::Lang::Tests => ed.tests_detail_lines().map(|(a, b)| (a, b, None)),
-        crate::syntax::Lang::Problems => ed.problem_detail.map(|(a, b, sev)| {
-            let token = match sev {
-                crate::lint::Severity::Error => crate::syntax::Token::Error,
-                crate::lint::Severity::Warning => crate::syntax::Token::Warning,
-                crate::lint::Severity::Info => crate::syntax::Token::Function,
-            };
-            (a, b, Some(theme.token(token)))
-        }),
-        _ => None,
-    };
-    if let Some((first, last, accent)) = detail_box
-        && last >= top
-        && first <= top + pl.rows
-    {
+    // Boxes behind lines of a panel page (failures, messages, docs), the left bar in
+    // their accent color.
+    for pb in &doc.boxes {
+        let (first, last) = (pb.first, pb.last);
+        if last < top || first > top + pl.rows || last >= rope.len_lines() {
+            continue;
+        }
+        let accent = pb.accent.map(|t| theme.token(t));
         let indent = rope
             .line(first)
             .chars()
@@ -1019,6 +1013,35 @@ fn draw_text_area(
                 ),
                 theme.current_line,
             );
+        }
+        // The place a list just showed: its line tinted, the name marked, focused or not.
+        if let Some(loc) = located.filter(|loc| loc.line == line) {
+            b.rect(
+                Rect::new(
+                    pl.text.x - l.cell_w * 0.5,
+                    y,
+                    pl.text.w + l.cell_w * 0.5,
+                    l.line_h,
+                ),
+                theme.located_line,
+            );
+            let x0 = col_x((ls + loc.start_col).min(le)).max(pl.text.x);
+            let x1 = col_x((ls + loc.end_col).min(le)).min(pl.text.right());
+            if x1 > x0 {
+                // An outline, so the name keeps its syntax colors.
+                let t = (1.5 * l.scale).round().max(1.0);
+                let x0 = (x0 - t).max(pl.text.x - l.cell_w * 0.5);
+                let x1 = (x1 + t).min(pl.text.right());
+                let (w, h) = (x1 - x0, l.line_h);
+                for r in [
+                    Rect::new(x0, y, w, t),
+                    Rect::new(x0, y + h - t, w, t),
+                    Rect::new(x0, y, t, h),
+                    Rect::new(x1 - t, y, t, h),
+                ] {
+                    b.rect(r, theme.accent);
+                }
+            }
         }
 
         if let Some(q) = &query {

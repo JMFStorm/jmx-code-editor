@@ -175,7 +175,7 @@ impl BuildJob {
         let (tx, rx) = mpsc::channel();
         let project = csproj.clone();
         std::thread::Builder::new()
-            .name("jmx-roslyn".into())
+            .name("jdc-roslyn".into())
             .spawn(move || {
                 let dir = project.parent().unwrap_or(Path::new(".")).to_path_buf();
                 let args: [&OsStr; 6] = [

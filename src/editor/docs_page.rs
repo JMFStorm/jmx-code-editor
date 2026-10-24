@@ -4,10 +4,11 @@
 
 use ropey::Rope;
 
+use super::Editor;
+use super::page::{PageText, same_spot};
 use super::selection::Selection;
-use super::{Editor, PANEL};
 use crate::symbols::dotnet_docs::{self, DotnetDocs};
-use crate::syntax::Lang;
+use crate::syntax::{Lang, Token};
 
 pub const DOCS_TITLE: &str = "Docs";
 
@@ -43,21 +44,44 @@ impl Editor {
     }
 
     fn refresh_docs_page(&mut self) {
+        self.lay_out_docs_page(false);
+    }
+
+    /// The Docs page laid out again at the panel's width, the cursor on the same text.
+    pub(super) fn refresh_docs_page_kept(&mut self) {
+        self.lay_out_docs_page(true);
+    }
+
+    fn lay_out_docs_page(&mut self, keep: bool) {
         let (Some(d), Some(idx)) = (self.symbols.dotnet.clone(), self.symbols.docs_current) else {
             return;
         };
         let Some((p, i)) = self.docs_page() else {
             return;
         };
-        let width = self.panes[PANEL].cols.max(40);
-        let (text, rows) = docs_text(&d, idx, &self.symbols.docs_matches, width);
+        let page = docs_text(&d, idx, &self.symbols.docs_matches, self.panel_width());
+        let new = Rope::from_str(&page.text());
         let doc = &mut self.panes[p].docs[i];
-        doc.rope = Rope::from_str(&text);
+        let (head, top) = if keep {
+            let top = doc.rope.line_to_char(
+                doc.view
+                    .top_line
+                    .min(doc.rope.len_lines().saturating_sub(1)),
+            );
+            (
+                same_spot(&doc.rope, doc.selection.head, &new),
+                new.char_to_line(same_spot(&doc.rope, top, &new)),
+            )
+        } else {
+            (0, 0)
+        };
+        doc.rope = new;
         doc.syntax.set_lang(Lang::Docs);
-        doc.selection = Selection::point(0);
-        doc.view.top_line = 0;
+        doc.selection = Selection::point(head);
+        doc.view.top_line = top;
         doc.view.left_col = 0;
-        self.symbols.docs_rows = rows;
+        doc.boxes = page.boxes;
+        self.symbols.docs_rows = page.rows;
     }
 
     /// Enter on the Docs page: open the API on the cursor's line.
@@ -87,98 +111,71 @@ impl Editor {
     }
 }
 
-/// `text` cut to `width` columns with `…`.
-fn cut(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
-/// The page text and the API each line opens.
-fn docs_text(
-    d: &DotnetDocs,
-    idx: u32,
-    matches: &[u32],
-    width: usize,
-) -> (String, Vec<Option<u32>>) {
-    let mut lines: Vec<(String, Option<u32>)> = Vec::new();
+/// The page and the API each line opens.
+fn docs_text(d: &DotnetDocs, idx: u32, matches: &[u32], width: usize) -> PageText<u32> {
+    let mut page: PageText<u32> = PageText::new(width);
     let doc = d.doc(idx);
     let (sig, _) = d.signature(idx, &doc);
-    let wrap = |text: &str, indent: usize| -> Vec<String> {
-        super::hover::wrap(text, width.saturating_sub(indent + 1))
-            .into_iter()
-            .map(|l| format!("{}{l}", " ".repeat(indent)))
-            .collect()
+    page.wrapped(&d.full_name(idx), 0, None);
+    page.hint(&format!(".NET API docs from {}.xml", d.assembly(idx)));
+    page.hint("w: Microsoft Learn · Enter: open · Backspace: back");
+    page.line("", None);
+    page.wrapped(&format!("  {sig}"), 2, None);
+    let section = |page: &mut PageText<u32>, title: &str| {
+        page.line("", None);
+        page.line(title, None);
     };
-    lines.push((d.full_name(idx), None));
-    lines.push((
-        format!("· .NET API docs from {}.xml", d.assembly(idx)),
-        None,
-    ));
-    lines.push((
-        "· w: Microsoft Learn · Enter: open · Backspace: back".into(),
-        None,
-    ));
-    lines.push((String::new(), None));
-    for l in wrap(&sig, 2) {
-        lines.push((l, None));
-    }
+    // Long texts go in boxes.
     if !doc.summary.is_empty() {
-        lines.push((String::new(), None));
-        lines.extend(wrap(&doc.summary, 0).into_iter().map(|l| (l, None)));
+        page.line("", None);
+        page.boxed(&doc.summary, 0, None, Some(Token::Function));
     }
-    let section = |lines: &mut Vec<(String, Option<u32>)>, title: &str| {
-        lines.push((String::new(), None));
-        lines.push((title.to_string(), None));
-    };
     if !doc.typeparams.is_empty() {
-        section(&mut lines, "Type parameters");
-        lines.push((format!("  {}", doc.typeparams.join(", ")), None));
+        section(&mut page, "Type parameters");
+        page.wrapped(&format!("  {}", doc.typeparams.join(", ")), 2, None);
     }
+    // `name — text`, continuation lines under the text.
+    let described = |page: &mut PageText<u32>, name: &str, text: &str| {
+        let hang = (2 + name.chars().count() + 3).min(width / 2);
+        page.wrapped(&format!("  {name} — {text}"), hang, None);
+    };
     if !doc.params.is_empty() {
-        section(&mut lines, "Parameters");
+        section(&mut page, "Parameters");
         for p in &doc.params {
-            for l in wrap(&format!("{} — {}", p.name, p.text), 2) {
-                lines.push((l, None));
-            }
+            described(&mut page, &p.name, &p.text);
         }
     }
     if let Some((_, text)) = &doc.returns
         && !text.is_empty()
     {
-        section(&mut lines, "Returns");
-        lines.extend(wrap(text, 2).into_iter().map(|l| (l, None)));
+        section(&mut page, "Returns");
+        page.wrapped(&format!("  {text}"), 2, None);
     }
     if !doc.exceptions.is_empty() {
-        section(&mut lines, "Exceptions");
+        section(&mut page, "Exceptions");
         for (ty, text) in &doc.exceptions {
-            for l in wrap(&format!("{ty} — {text}"), 2) {
-                lines.push((l, None));
-            }
+            described(&mut page, ty, text);
         }
     }
     if !doc.remarks.is_empty() {
-        section(&mut lines, "Remarks");
-        lines.extend(wrap(&doc.remarks, 2).into_iter().map(|l| (l, None)));
+        section(&mut page, "Remarks");
+        page.boxed(&doc.remarks, 2, None, Some(Token::Function));
     }
     // Overloads of a member; members of a type.
     let overloads = d.overloads(idx);
     if overloads.len() > 1 {
-        section(&mut lines, &format!("Overloads ({})", overloads.len()));
+        section(&mut page, &format!("Overloads ({})", overloads.len()));
         for o in overloads {
             let (s, _) = d.signature(o, &d.doc(o));
             let mark = if o == idx { "●" } else { "▸" };
-            lines.push((format!("  {mark} {s}"), Some(o)));
+            page.wrapped(&format!("  {mark} {s}"), 4, Some(o));
         }
     }
     let (kind, _, _) = d.describe(idx);
     if kind == 'T' {
         let members = d.members(idx);
         if !members.is_empty() {
-            section(&mut lines, &format!("Members ({})", members.len()));
+            section(&mut page, &format!("Members ({})", members.len()));
             let mut seen = std::collections::HashSet::new();
             for m in members.into_iter().take(MAX_MEMBERS) {
                 let (_, name, _) = d.describe(m);
@@ -202,24 +199,18 @@ fn docs_text(
                 } else {
                     format!("  ▸ {label} — {first}")
                 };
-                lines.push((cut(&row, width), Some(m)));
+                page.wrapped(&row, 4, Some(m));
             }
         }
     }
     let others: Vec<u32> = matches.iter().copied().filter(|m| *m != idx).collect();
     if !others.is_empty() {
-        section(&mut lines, "Other matches for this name");
+        section(&mut page, "Other matches for this name");
         for m in others {
-            lines.push((format!("  ▸ {}", d.full_name(m)), Some(m)));
+            page.wrapped(&format!("  ▸ {}", d.full_name(m)), 4, Some(m));
         }
     }
-    let url = dotnet_docs::learn_url(d.id(idx)).unwrap_or_default();
-    lines.push((String::new(), None));
-    lines.push((format!("· {url}"), None));
-    let text = lines
-        .iter()
-        .map(|(l, _)| l.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    (text, lines.into_iter().map(|(_, r)| r).collect())
+    page.line("", None);
+    page.hint(&dotnet_docs::learn_url(d.id(idx)).unwrap_or_default());
+    page
 }

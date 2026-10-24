@@ -95,7 +95,7 @@ impl Session {
         if let Some(ws) = &self.editor.workspace {
             parts.push(ws.name.clone());
         }
-        parts.push("JMX".to_string());
+        parts.push("JDC".to_string());
         parts.join(" - ")
     }
 
@@ -123,6 +123,7 @@ impl Session {
             pane.rows = pl.rows;
             pane.cols = pl.cols;
         }
+        self.editor.panel_resized();
         if let Some(p) = &layout.picker {
             self.editor.picker_rows = p.rows;
         }

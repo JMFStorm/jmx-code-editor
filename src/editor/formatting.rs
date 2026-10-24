@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(ed.doc().rope.to_string(), "a\nb\n");
         assert!(ed.message.as_ref().unwrap().text.contains("Cleaned up"));
 
-        let dir = std::env::temp_dir().join(format!("jmx-fmtcs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-fmtcs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("P.cs");
         std::fs::write(&file, "class P { }   \n\n\n").unwrap();
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn prettier_results_apply_unless_the_file_changed() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("jmx-fmtjs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-fmtjs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
         // A project-local "prettier" that uppercases its input after a short delay.
@@ -276,7 +276,7 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let file = dir.join("a.js");
         std::fs::write(&file, "let x\n").unwrap();
-        if std::env::var_os("JMX_PRETTIER").is_some() {
+        if std::env::var_os("JDC_PRETTIER").is_some() {
             return;
         }
 

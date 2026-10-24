@@ -4,8 +4,11 @@
 
 pub mod cs;
 pub mod dotnet_docs;
+pub mod dts;
 pub mod js;
 pub mod mdn;
+pub mod npm;
+pub mod refs;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +23,8 @@ pub enum Kind {
     Enum,
     Property,
     Const,
+    /// A type alias (`type X = …`, JSDoc `@typedef`).
+    Type,
     /// A whole file (a default-imported `.vue` component).
     Module,
 }
@@ -35,6 +40,7 @@ impl Kind {
             Kind::Enum => "enum",
             Kind::Property => "property",
             Kind::Const => "const",
+            Kind::Type => "type",
             Kind::Module => "module",
         }
     }
@@ -60,6 +66,10 @@ pub struct Doc {
     pub returns: Option<(String, String)>,
     /// `@type {T}` of a JSDoc'd constant.
     pub ty: String,
+    /// JSDoc `@see` links / references.
+    pub see: Vec<String>,
+    /// JSDoc `@example`, as written.
+    pub example: String,
     /// C# `<remarks>`.
     pub remarks: String,
     /// C# `<exception cref="T">text</exception>`: the exception type and when.
@@ -128,8 +138,12 @@ pub struct FileSymbols {
     pub imports: Vec<Import>,
     /// The name exported as default (`export default function f`).
     pub default_export: Option<String>,
-    /// Names imported from packages (`import { ref } from 'vue'`): local name and package.
-    pub packages: Vec<(String, String)>,
+    /// Names imported from packages (`import { ref as r } from 'vue'`): local name, the
+    /// imported name (`None`: the default export) and the package.
+    pub packages: Vec<(String, Option<String>, String)>,
+    /// Type aliases to another file's type: `@typedef {import('./models').User} User` →
+    /// (`User`, the models file, `User`).
+    pub aliases: Vec<(String, PathBuf, String)>,
 }
 
 /// Language family: symbols only match within one.
@@ -151,7 +165,36 @@ pub fn family(path: &Path) -> Option<Family> {
 /// Scan a file's text (`path` decides the language and resolves imports).
 pub fn scan(path: &Path, text: &str) -> Option<FileSymbols> {
     match family(path)? {
-        Family::Js => Some(js::scan(path, text)),
+        Family::Js => {
+            let mut f = js::scan(path, text);
+            // TypeScript: interfaces, type aliases, enums (and all of a `.d.ts`).
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let dts_file = [".d.ts", ".d.mts", ".d.cts"]
+                .iter()
+                .any(|e| name.ends_with(e));
+            let ts = [".ts", ".tsx", ".mts", ".cts"]
+                .iter()
+                .any(|e| name.ends_with(e));
+            if dts_file || ts {
+                let d = dts::scan(text);
+                for s in d.symbols {
+                    let wanted =
+                        dts_file || matches!(s.kind, Kind::Interface | Kind::Type | Kind::Enum);
+                    if wanted
+                        && !f
+                            .symbols
+                            .iter()
+                            .any(|o| o.name == s.name && o.line == s.line)
+                    {
+                        f.symbols.push(s);
+                    }
+                }
+            }
+            Some(f)
+        }
         Family::CSharp => Some(cs::scan(text)),
     }
 }
@@ -164,6 +207,11 @@ pub struct SymbolIndex {
 }
 
 impl SymbolIndex {
+    /// Every indexed file.
+    pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.files.keys()
+    }
+
     pub fn file(&self, path: &Path) -> Option<&FileSymbols> {
         self.files.get(path)
     }

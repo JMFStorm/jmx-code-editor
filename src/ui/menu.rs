@@ -140,6 +140,7 @@ pub fn menu_entries(menu: MenuId, ed: &Editor) -> Vec<MenuEntry> {
                 MenuEntry::separator(),
                 MenuEntry::item("Go to Definition", GoToDefinition, doc),
                 MenuEntry::item("Go Back", GoBack, !ed.symbols.back.is_empty()),
+                MenuEntry::item("Find All References", FindAllReferences, doc),
                 MenuEntry::item("Parameter Hints", SignatureHelp, doc),
                 MenuEntry::item("Open Docs in Browser…", OpenDocsInBrowser, doc),
             ]

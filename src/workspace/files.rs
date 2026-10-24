@@ -207,7 +207,7 @@ mod tests {
     use std::fs;
 
     fn fixture(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jmx-files-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-files-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         for d in ["src", "node_modules/pkg", ".git", "dist"] {
             fs::create_dir_all(dir.join(d)).unwrap();
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn gitignore_checks_for_single_files() {
-        let dir = std::env::temp_dir().join(format!("jmx-gi-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-gi-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("web/gen")).unwrap();
         std::fs::create_dir_all(dir.join("web/tests")).unwrap();

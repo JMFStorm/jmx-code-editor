@@ -116,7 +116,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("JMX")
+            .with_title("JDC")
             .with_inner_size(LogicalSize::new(1100.0, 720.0))
             .with_min_inner_size(LogicalSize::new(320.0, 200.0))
             .with_window_icon(window_icon());
@@ -133,7 +133,7 @@ impl ApplicationHandler for App {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {
                 log::error!("GPU initialization failed: {e:#}");
-                eprintln!("jmx: GPU initialization failed: {e:#}");
+                eprintln!("jdc: GPU initialization failed: {e:#}");
                 event_loop.exit();
                 return;
             }

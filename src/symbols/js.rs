@@ -270,7 +270,59 @@ pub fn scan(path: &Path, text: &str) -> FileSymbols {
         }
         k += 1;
     }
+    typedefs(path, text, &mut out);
     out
+}
+
+/// JSDoc `@typedef {T} Name` as `Type` symbols; `import('<file>').X` types become aliases.
+fn typedefs(path: &Path, text: &str, out: &mut FileSymbols) {
+    let mut at = 0;
+    while let Some(k) = text[at..].find("@typedef").map(|n| at + n) {
+        at = k + "@typedef".len();
+        let rest = &text[at..];
+        let (ty, after) = take_type(rest);
+        let after_at = text.len() - after.len();
+        let name: String = after
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let name_at = after_at + (after.len() - after.trim_start().len());
+        let (line, col) = line_col(text, name_at);
+        let ty = one_line(&ty);
+        if let Some(target) = import_type(path, &ty) {
+            out.aliases.push((name.clone(), target.0, target.1));
+        }
+        out.symbols.push(Symbol {
+            name: name.clone(),
+            kind: Kind::Type,
+            container: None,
+            signature: format!("type {name} = {ty}"),
+            params: vec![],
+            doc: Doc::default(),
+            line,
+            col,
+        });
+    }
+}
+
+/// `import('./models').User` → the file and `User`.
+pub fn import_type(path: &Path, ty: &str) -> Option<(PathBuf, String)> {
+    let rest = ty.trim().strip_prefix("import(")?;
+    let quote = rest.chars().next()?;
+    let close = rest[1..].find(quote)? + 1;
+    let spec = &rest[1..close];
+    let name = rest[close + 1..]
+        .trim_start_matches(')')
+        .strip_prefix('.')?;
+    let name: String = name
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    Some((resolve_import(path, spec)?, name))
 }
 
 /// A function symbol: `name` at token `name_at`, parameters in the parens opened at `open`
@@ -337,7 +389,7 @@ fn fn_value_params(toks: &[Token], v: usize) -> Option<usize> {
 }
 
 /// The first token of the declaration whose keyword or name is at `k` (modifiers included).
-fn decl_start(toks: &[Token], k: usize) -> usize {
+pub(crate) fn decl_start(toks: &[Token], k: usize) -> usize {
     let mut s = k;
     while s > 0
         && matches!(&toks[s - 1].tok, Tok::Ident(w) if MODIFIERS.contains(&w.as_str()) || w == "const" || w == "let" || w == "var")
@@ -368,7 +420,7 @@ fn note_default(toks: &[Token], start: usize, name: &str, out: &mut FileSymbols)
 }
 
 /// The JSDoc comment right before token `start` (only whitespace in between).
-fn doc_before(src: &str, toks: &[Token], start: usize) -> Doc {
+pub(crate) fn doc_before(src: &str, toks: &[Token], start: usize) -> Doc {
     let from = if start == 0 { 0 } else { toks[start - 1].end };
     let gap = &src[from..toks[start].start];
     let Some(open) = gap.rfind("/**") else {
@@ -401,8 +453,9 @@ pub fn parse_jsdoc(comment: &str) -> Doc {
         if l.trim_start().starts_with('@') {
             tags.push(l.trim().to_string());
         } else if let Some(t) = tags.last_mut() {
-            t.push(' ');
-            t.push_str(l.trim());
+            // Lines kept (an `@example` is shown as written).
+            t.push('\n');
+            t.push_str(l.trim_end());
         } else {
             summary.push(l);
         }
@@ -439,6 +492,25 @@ pub fn parse_jsdoc(comment: &str) -> Doc {
                 doc.returns = Some((one_line(&ty), inline_tags(&one_line(text))));
             }
             "@type" => doc.ty = one_line(&take_type(rest).0),
+            "@see" => {
+                // `{@link url}` keeps the url.
+                let link = rest
+                    .trim()
+                    .trim_start_matches("{@link")
+                    .trim_end_matches('}')
+                    .trim();
+                let link = link.split(['|', ' ']).next().unwrap_or(link);
+                if !link.is_empty() {
+                    doc.see.push(link.to_string());
+                }
+            }
+            "@example" => {
+                let lines: Vec<&str> = rest
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("```"))
+                    .collect();
+                doc.example = lines.join("\n").trim_matches('\n').to_string();
+            }
             _ => {}
         }
     }
@@ -542,8 +614,11 @@ fn parse_import(path: &Path, toks: &[Token], k: usize, out: &mut FileSymbols) ->
                     from: from.clone(),
                 }));
         } else if !spec.starts_with('.') && !spec.starts_with('/') {
-            out.packages
-                .extend(found.into_iter().map(|(local, _)| (local, spec.clone())));
+            out.packages.extend(
+                found
+                    .into_iter()
+                    .map(|(local, imported)| (local, imported, spec.clone())),
+            );
         }
         return j + 2;
     }
@@ -562,7 +637,9 @@ pub fn resolve_import(file: &Path, spec: &str) -> Option<PathBuf> {
             .find(|d| d.join("package.json").is_file())?;
         root.join("src").join(rest)
     };
-    const EXTS: &[&str] = &["js", "ts", "vue", "mjs", "jsx", "tsx", "cjs", "mts"];
+    const EXTS: &[&str] = &[
+        "js", "ts", "vue", "mjs", "jsx", "tsx", "cjs", "mts", "d.ts", "d.mts",
+    ];
     let mut candidates = vec![base.clone()];
     for e in EXTS {
         let mut s = base.clone().into_os_string();
@@ -578,7 +655,7 @@ pub fn resolve_import(file: &Path, spec: &str) -> Option<PathBuf> {
 
 /// A `.vue` file with everything outside its `<script>` blocks blanked (lines and columns
 /// stay where they were).
-fn script_only(text: &str) -> String {
+pub(crate) fn script_only(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     loop {
@@ -726,7 +803,7 @@ const api = {
 
     #[test]
     fn imports_resolve_to_files() {
-        let dir = std::env::temp_dir().join(format!("jmx-sym-imp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-sym-imp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src/utils")).unwrap();
         std::fs::create_dir_all(dir.join("src/components")).unwrap();
@@ -737,7 +814,14 @@ const api = {
         let file = dir.join("src/App.vue");
         let src = "<script setup>\nimport Card from './components/Card.vue';\nimport { formatDate as fd, formatCurrency } from \"@/utils/format\";\nimport { ref } from 'vue';\nimport type { X } from './nope';\n</script>";
         let f = scan(&file, src);
-        assert_eq!(f.packages, [("ref".to_string(), "vue".to_string())]);
+        assert_eq!(
+            f.packages,
+            [(
+                "ref".to_string(),
+                Some("ref".to_string()),
+                "vue".to_string()
+            )]
+        );
         let fmt = dir.join("src/utils/format.js");
         assert_eq!(
             f.imports,

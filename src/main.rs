@@ -30,7 +30,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use winit::event_loop::EventLoop;
 
 pub const USAGE: &str = "\
-Usage: jmx [OPTIONS] [FILE]...
+Usage: jdc [OPTIONS] [FILE]...
 
 Options:
   --headless          run without a window; read script commands (see below)
@@ -40,7 +40,7 @@ Options:
   --software          headless: use the CPU fallback renderer
   --no-restore        do not reopen the last workspace
   --log-dir DIR       folder for log files
-  --log-level SPEC    log filter: trace | debug,wgpu_hal=info | *=info (env: JMX_LOG)
+  --log-level SPEC    log filter: trace | debug,wgpu_hal=info | *=info (env: JDC_LOG)
   -h, --help          show this help
   -V, --version       show the version
 
@@ -103,7 +103,7 @@ fn parse_args(raw: impl Iterator<Item = OsString>) -> Result<Parsed> {
         match name.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "jmx {} - lightweight GPU text editor\n",
+                    "jdc {} - lightweight GPU text editor\n",
                     env!("CARGO_PKG_VERSION")
                 );
                 println!("{USAGE}\n");
@@ -115,7 +115,7 @@ fn parse_args(raw: impl Iterator<Item = OsString>) -> Result<Parsed> {
                 return Ok(Parsed::Exit);
             }
             "-V" | "--version" => {
-                println!("jmx {}", env!("CARGO_PKG_VERSION"));
+                println!("jdc {}", env!("CARGO_PKG_VERSION"));
                 return Ok(Parsed::Exit);
             }
             "--headless" => args.headless = true,
@@ -156,14 +156,14 @@ fn main() {
         Ok(Parsed::Run(a)) => a,
         Ok(Parsed::Exit) => return,
         Err(e) => {
-            eprintln!("jmx: {e:#}");
+            eprintln!("jdc: {e:#}");
             std::process::exit(headless::EXIT_SCRIPT_ERROR);
         }
     };
 
     logging::init(logging::LogOptions {
         dir: args.log_dir.clone(),
-        name: if args.headless { "jmx-headless" } else { "jmx" },
+        name: if args.headless { "jdc-headless" } else { "jdc" },
         spec: args.log_level.clone(),
     });
     log::info!(
@@ -172,15 +172,15 @@ fn main() {
         args.paths,
         logging::log_path().map_or("(stderr)".into(), |p| p.display().to_string())
     );
-    if cfg!(debug_assertions) && std::env::var_os("JMX_TEST_PANIC").is_some() {
-        panic!("JMX_TEST_PANIC is set: testing the panic hook");
+    if cfg!(debug_assertions) && std::env::var_os("JDC_TEST_PANIC").is_some() {
+        panic!("JDC_TEST_PANIC is set: testing the panic hook");
     }
 
     let code = match run(args) {
         Ok(code) => code,
         Err(e) => {
             log::error!("{e:#}");
-            eprintln!("jmx: {e:#}");
+            eprintln!("jdc: {e:#}");
             1
         }
     };

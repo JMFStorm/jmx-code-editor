@@ -12,7 +12,7 @@ use crate::workspace::is_workspace_file;
 pub enum PickerKind {
     /// Open a file (browse folders).
     OpenFile,
-    /// Open a `.jmxws` workspace file (browse folders).
+    /// Open a `.jdcws` workspace file (browse folders).
     OpenWorkspace,
     /// Pick a folder to add to the workspace (browse folders).
     ChooseFolder,
@@ -198,7 +198,7 @@ impl FilePicker {
     pub fn hint(&self) -> &'static str {
         match self.kind {
             PickerKind::OpenFile => "type to filter, Enter opens, Backspace goes up",
-            PickerKind::OpenWorkspace => "showing folders and .jmxws files, Enter opens",
+            PickerKind::OpenWorkspace => "showing folders and .jdcws files, Enter opens",
             PickerKind::ChooseFolder => "Enter on the first row adds the folder, Backspace goes up",
             PickerKind::RemoveFolder => "Enter removes the selected folder",
             PickerKind::QuickOpen => "type part of a file name, :N goes to a line, e.g. appvue:42",
@@ -447,11 +447,11 @@ mod tests {
 
     /// Per-test directory: tests run in parallel and each deletes its own fixture.
     fn fixture(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jmx-picker-{test}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-picker-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::create_dir_all(dir.join("Assets")).unwrap();
-        for f in ["b.txt", "A.md", ".hidden", "src/main.js", "proj.jmxws"] {
+        for f in ["b.txt", "A.md", ".hidden", "src/main.js", "proj.jdcws"] {
             fs::write(dir.join(f), "").unwrap();
         }
         fs::canonicalize(dir).unwrap()
@@ -467,12 +467,12 @@ mod tests {
         let mut p = FilePicker::new(dir.clone());
         assert_eq!(
             names(&p),
-            ["..", "Assets", "src", "A.md", "b.txt", "proj.jmxws"]
+            ["..", "Assets", "src", "A.md", "b.txt", "proj.jdcws"]
         );
         assert_eq!(p.selected_entry().unwrap().name, "Assets");
 
         p.type_text("S");
-        assert_eq!(names(&p), ["Assets", "src", "proj.jmxws"]);
+        assert_eq!(names(&p), ["Assets", "src", "proj.jdcws"]);
         p.move_selection(1);
         assert_eq!(p.activate(), PickResult::None); // entered src/
         assert_eq!(p.dir, dir.join("src"));
@@ -495,7 +495,7 @@ mod tests {
     fn workspace_and_folder_kinds() {
         let dir = fixture("kinds");
         let p = FilePicker::browse(PickerKind::OpenWorkspace, dir.clone());
-        assert_eq!(names(&p), ["..", "Assets", "src", "proj.jmxws"]);
+        assert_eq!(names(&p), ["..", "Assets", "src", "proj.jdcws"]);
 
         let mut p = FilePicker::browse(PickerKind::ChooseFolder, dir.clone());
         assert_eq!(p.entries().count(), 4); // add-this, .., Assets, src

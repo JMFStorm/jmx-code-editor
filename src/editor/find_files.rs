@@ -123,7 +123,8 @@ impl Editor {
         self.track_test_edits();
         let tested = self.poll_tests();
         let indexed = self.poll_symbols();
-        self.poll_search() || formatted || linted || tested || indexed
+        let referenced = self.poll_references();
+        self.poll_search() || formatted || linted || tested || indexed || referenced
     }
 
     fn poll_search(&mut self) -> bool {
@@ -165,7 +166,7 @@ impl Editor {
             Some(Instant::now() + super::formatting::FORMAT_POLL)
         } else if self.linting() {
             Some(Instant::now() + super::linting::LINT_POLL)
-        } else if self.symbols_scanning() {
+        } else if self.symbols_scanning() || self.refs.running() {
             Some(Instant::now() + POLL)
         } else {
             None
@@ -184,6 +185,7 @@ impl Editor {
             || self.linting()
             || self.tests_busy()
             || self.symbols_scanning()
+            || self.refs.running()
     }
 
     /// Wait (blocking) until background work is done, up to `timeout`. For headless scripts.

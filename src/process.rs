@@ -200,18 +200,18 @@ mod tests {
 
     #[test]
     fn finds_project_local_tools_walking_up() {
-        let dir = std::env::temp_dir().join(format!("jmx-findtool-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-findtool-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let bin = dir.join("node_modules/.bin");
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(dir.join("src/deep")).unwrap();
         let name = if cfg!(windows) {
-            "jmxtool.cmd"
+            "jdctool.cmd"
         } else {
-            "jmxtool"
+            "jdctool"
         };
         fs::write(bin.join(name), "").unwrap();
-        let found = find_node_tool("jmxtool", "JMX_TEST_NO_SUCH_VAR", &dir.join("src/deep"));
+        let found = find_node_tool("jdctool", "JDC_TEST_NO_SUCH_VAR", &dir.join("src/deep"));
         assert_eq!(found, Some(bin.join(name)));
         fs::remove_dir_all(&dir).unwrap();
     }

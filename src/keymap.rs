@@ -165,6 +165,7 @@ const OTHERS: &[Binding] = &[
     bind(true, NO, false, c('i'), ShowHover),
     bind(false, NO, false, n(NK::F12), GoToDefinition),
     bind(true, NO, false, n(NK::F12), OpenDocsInBrowser),
+    bind(false, YES, false, n(NK::F12), FindAllReferences),
     bind(false, NO, true, n(NK::ArrowLeft), GoBack),
     bind(true, YES, false, n(NK::Space), SignatureHelp),
     // Some platforms report Space as a character.

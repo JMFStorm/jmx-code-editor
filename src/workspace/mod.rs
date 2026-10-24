@@ -1,4 +1,4 @@
-//! Workspaces: a named set of folders plus the full editor state, saved as a `.jmxws` file
+//! Workspaces: a named set of folders plus the full editor state, saved as a `.jdcws` file
 //! (pretty JSON). Paths under the workspace file's folder are stored relative to it.
 
 pub mod files;
@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 use crate::editor::document::Document;
 use crate::editor::search::SearchOptions;
 use crate::editor::selection::Selection;
-use crate::editor::{DOCS_TITLE, Editor, PROBLEMS_TITLE, Pane, TESTS_TITLE};
+use crate::editor::{DOCS_TITLE, Editor, PROBLEMS_TITLE, Pane, REFERENCES_TITLE, TESTS_TITLE};
 use crate::help;
 use crate::syntax::Lang;
 use crate::ui::explorer::{DEFAULT_WIDTH_COLS, MAX_WIDTH_COLS, MIN_WIDTH_COLS};
 
-pub const EXTENSION: &str = "jmxws";
+pub const EXTENSION: &str = "jdcws";
 const FORMAT_VERSION: u32 = 1;
 
 /// The open workspace (workspace mode). `None` on the editor means file mode.
@@ -41,7 +41,7 @@ impl Workspace {
         }
     }
 
-    /// Suggested file name, e.g. "My Project" → "My Project.jmxws".
+    /// Suggested file name, e.g. "My Project" → "My Project.jdcws".
     pub fn default_file_name(&self) -> String {
         let clean: String = self
             .name
@@ -204,7 +204,7 @@ pub fn read_file(path: &Path) -> Result<WorkspaceFile> {
         .with_context(|| format!("{} is not a valid workspace file", path.display()))?;
     if wf.version > FORMAT_VERSION {
         bail!(
-            "{} was written by a newer JMX (format {})",
+            "{} was written by a newer JDC (format {})",
             path.display(),
             wf.version
         );
@@ -223,7 +223,7 @@ pub fn write_file(path: &Path, wf: &WorkspaceFile) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
-    let tmp = path.with_file_name(format!(".{name}.jmx-tmp"));
+    let tmp = path.with_file_name(format!(".{name}.jdc-tmp"));
     fs::write(&tmp, json).with_context(|| format!("cannot write {}", tmp.display()))?;
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
@@ -268,12 +268,22 @@ impl Editor {
                 // The Docs page is not kept (it shows a lookup, not a place).
                 active: pane.docs[..pane.active.min(pane.docs.len())]
                     .iter()
-                    .filter(|d| d.virtual_name.as_deref() != Some(DOCS_TITLE))
+                    .filter(|d| {
+                        !matches!(
+                            d.virtual_name.as_deref(),
+                            Some(DOCS_TITLE | REFERENCES_TITLE)
+                        )
+                    })
                     .count(),
                 tabs: pane
                     .docs
                     .iter()
-                    .filter(|d| d.virtual_name.as_deref() != Some(DOCS_TITLE))
+                    .filter(|d| {
+                        !matches!(
+                            d.virtual_name.as_deref(),
+                            Some(DOCS_TITLE | REFERENCES_TITLE)
+                        )
+                    })
                     .map(|d| match (&d.virtual_name, &d.path) {
                         (Some(n), _) if n == help::SHORTCUTS_TITLE => TabState::Shortcuts,
                         (Some(n), _) if n == PROBLEMS_TITLE => TabState::Problems,
@@ -497,7 +507,7 @@ mod tests {
     use crate::config::Config;
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jmx-ws-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-ws-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("proj/src")).unwrap();
         dir
@@ -506,7 +516,7 @@ mod tests {
     #[test]
     fn last_workspace_is_remembered_and_forgotten() {
         let dir = temp("last");
-        let ws_file = dir.join("w.jmxws");
+        let ws_file = dir.join("w.jdcws");
         let state = dir.join("state.json");
         let mut ed = Editor::new(Config::default(), &[]);
         let mut ws = Workspace::new("w");
@@ -529,7 +539,7 @@ mod tests {
 
         // A remembered workspace that no longer exists is dropped with a warning.
         crate::app_state::AppState {
-            last_workspace: Some(dir.join("gone.jmxws")),
+            last_workspace: Some(dir.join("gone.jdcws")),
         }
         .save(&state)
         .unwrap();
@@ -647,7 +657,7 @@ mod tests {
         let dir = temp("rt");
         let file = dir.join("proj/src/a.txt");
         fs::write(&file, "on disk\n").unwrap();
-        let ws_file = dir.join("demo.jmxws");
+        let ws_file = dir.join("demo.jdcws");
 
         let mut ed = Editor::new(Config::default(), std::slice::from_ref(&file));
         let mut ws = Workspace::new("demo");
@@ -695,7 +705,7 @@ mod tests {
         let dir = temp("missing");
         let file = dir.join("proj/gone.txt");
         fs::write(&file, "x").unwrap();
-        let ws_file = dir.join("w.jmxws");
+        let ws_file = dir.join("w.jdcws");
         let mut ed = Editor::new(Config::default(), std::slice::from_ref(&file));
         let mut ws = Workspace::new("w");
         ws.file = Some(ws_file.clone());
@@ -715,7 +725,7 @@ mod tests {
         let dir = temp("quit");
         let file = dir.join("proj/a.txt");
         fs::write(&file, "a").unwrap();
-        let ws_file = dir.join("q.jmxws");
+        let ws_file = dir.join("q.jdcws");
         let mut ed = Editor::new(Config::default(), std::slice::from_ref(&file));
         let mut ws = Workspace::new("q");
         ws.folders.push(dir.join("proj"));
@@ -755,7 +765,7 @@ mod tests {
     #[test]
     fn rejects_bad_files() {
         let dir = temp("bad");
-        let f = dir.join("bad.jmxws");
+        let f = dir.join("bad.jdcws");
         fs::write(&f, "{ not json").unwrap();
         assert!(read_file(&f).is_err());
         fs::write(
@@ -764,7 +774,7 @@ mod tests {
         )
         .unwrap();
         assert!(read_file(&f).is_err());
-        assert_eq!(Workspace::new("a/b").default_file_name(), "a_b.jmxws");
+        assert_eq!(Workspace::new("a/b").default_file_name(), "a_b.jdcws");
         fs::remove_dir_all(&dir).unwrap();
     }
 }

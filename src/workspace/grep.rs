@@ -93,7 +93,7 @@ impl SearchJob {
             elapsed: None,
         };
         std::thread::Builder::new()
-            .name("jmx-grep".into())
+            .name("jdc-grep".into())
             .spawn(move || run(req, overrides, tx, cancel, files_searched))
             .map_err(|e| format!("Cannot start search: {e}"))?;
         Ok(job)
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn searches_tree_with_filters_and_unsaved_text() {
-        let dir = std::env::temp_dir().join(format!("jmx-grep-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-grep-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::create_dir_all(dir.join("node_modules/x")).unwrap();

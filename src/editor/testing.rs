@@ -10,12 +10,14 @@ use std::time::{Duration, Instant};
 use ropey::Rope;
 
 use super::linting::Target;
+use super::page::{PageBox, PageText};
 use super::selection::Selection;
 use super::{EDITOR, Editor};
 use crate::lint::eslint::{self, LintJob, Scope};
 use crate::lint::roslyn::{self, BuildJob};
 use crate::lint::{Severity, Source};
 use crate::syntax::Lang;
+use crate::syntax::Token;
 use crate::test_explorer::run::{self, Request, TestJob};
 use crate::test_explorer::watch::FsWatcher;
 use crate::test_explorer::{self as tx, FileTests, Framework, Project, RunResult, Status};
@@ -170,7 +172,7 @@ impl Editor {
         }
         let (tx_, rx) = mpsc::channel();
         std::thread::Builder::new()
-            .name("jmx-test-scan".into())
+            .name("jdc-test-scan".into())
             .spawn(move || {
                 let started = Instant::now();
                 let mut projects: HashMap<PathBuf, Option<Project>> = HashMap::new();
@@ -1010,11 +1012,12 @@ impl Editor {
                 self.reparse_tests(&p);
             }
         }
-        let (text, rows) = self.tests_text();
+        let (text, rows, boxes) = self.tests_text();
         self.open_virtual(TESTS_TITLE, &text);
         self.tests.rows = rows;
         if let Some((p, i)) = self.tests_page() {
             self.panes[p].docs[i].syntax.set_lang(Lang::Tests);
+            self.panes[p].docs[i].boxes = boxes;
         }
         self.refresh_tests_page();
     }
@@ -1043,9 +1046,10 @@ impl Editor {
                 TestRow::Detail(id) => TestRow::Test(id),
                 other => other,
             });
-        let (text, rows) = self.tests_text();
+        let (text, rows, boxes) = self.tests_text();
         if self.panes[p].docs[i].rope == text.as_str() {
             self.tests.rows = rows;
+            self.panes[p].docs[i].boxes = boxes;
             return;
         }
         let new_line = keep
@@ -1054,12 +1058,13 @@ impl Editor {
         let doc = &mut self.panes[p].docs[i];
         doc.rope = Rope::from_str(&text);
         doc.syntax.set_lang(Lang::Tests);
+        doc.boxes = boxes;
         let line = new_line.min(doc.rope.len_lines().saturating_sub(1));
         doc.selection = Selection::point(doc.rope.line_to_char(line));
         self.tests.rows = rows;
     }
 
-    fn tests_text(&self) -> (String, Vec<Option<TestRow>>) {
+    fn tests_text(&self) -> (String, Vec<Option<TestRow>>, Vec<PageBox>) {
         let tree = &self.tests.tree;
         let (passed, failed, not_run, running) = tree.counts();
         let mut lines: Vec<(String, Option<TestRow>)> = Vec::new();
@@ -1164,12 +1169,29 @@ impl Editor {
                 }
             }
         }
-        let text = lines
-            .iter()
-            .map(|(l, _)| l.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        (text, lines.into_iter().map(|(_, r)| r).collect())
+        // Laid out at the panel's width: rows wrap under their name; failure boxes.
+        let mut page: PageText<TestRow> = PageText::new(self.panel_width());
+        let mut k = 0;
+        while k < lines.len() {
+            if matches!(lines[k].1, Some(TestRow::Detail(_))) {
+                let first = page.len();
+                while k < lines.len() && matches!(lines[k].1, Some(TestRow::Detail(_))) {
+                    page.line(lines[k].0.clone(), lines[k].1.clone());
+                    k += 1;
+                }
+                page.boxes.push(PageBox {
+                    first,
+                    last: page.len() - 1,
+                    accent: Some(Token::Error),
+                });
+                continue;
+            }
+            let (l, r) = &lines[k];
+            let hang = l.chars().position(|c| c.is_alphanumeric()).unwrap_or(0);
+            page.wrapped(l, hang, r.clone());
+            k += 1;
+        }
+        (page.text(), page.rows, page.boxes)
     }
 
     /// Rows for the tests of `file` under suite `path`: direct tests and nested suites, in
@@ -1190,12 +1212,8 @@ impl Editor {
             if suite.as_slice() == path {
                 let status = t.status();
                 let mut s = format!("{pad}  {} {}", status_glyph(status), t.found.name);
+                // A failure's message shows in the box when its row is selected.
                 match (status, t.current_result()) {
-                    (Status::Failed, Some(r)) => {
-                        if let Some(m) = &r.message {
-                            s.push_str(&format!("   — {m}"));
-                        }
-                    }
                     (Status::Passed, Some(r)) => {
                         if let Some(d) = r.duration {
                             s.push_str(&format!("   {} ms", d.as_millis()));
@@ -1213,10 +1231,7 @@ impl Editor {
                     && let Some(text) = r.detail.as_ref().or(r.message.as_ref())
                 {
                     let indent = indent + 4;
-                    let width = self.panes[super::PANEL]
-                        .cols
-                        .saturating_sub(indent + 3)
-                        .max(20);
+                    let width = self.panel_width().saturating_sub(indent + 4).max(16);
                     let root = self.tests.tree.project_of(&t.file).map(|p| p.root.clone());
                     for l in wrap_text(&tidy_failure(text, root.as_deref()), width) {
                         lines.push((
@@ -1324,7 +1339,8 @@ impl Editor {
         }
     }
 
-    /// Page lines of the failure box, for drawing it.
+    /// Page lines of the failure box.
+    #[cfg(test)]
     pub fn tests_detail_lines(&self) -> Option<(usize, usize)> {
         let is_detail = |r: &Option<TestRow>| matches!(r, Some(TestRow::Detail(_)));
         let first = self.tests.rows.iter().position(is_detail)?;
@@ -1337,6 +1353,7 @@ impl Editor {
         let doc = self.doc();
         let line = doc.rope.char_to_line(doc.selection.head) as isize;
         let rows = &self.tests.rows;
+        let here = rows.get(line as usize).cloned().flatten();
         let mut k = line;
         loop {
             k += delta;
@@ -1345,11 +1362,18 @@ impl Editor {
             }
             match &rows[k as usize] {
                 Some(TestRow::Detail(_)) | None => continue,
+                // A wrapped row's other lines.
+                r if *r == here => continue,
                 Some(_) => break,
             }
         }
+        // The row's first line.
+        let mut k = k as usize;
+        while k > 0 && rows[k - 1] == rows[k] {
+            k -= 1;
+        }
         let doc = self.doc_mut();
-        doc.selection = Selection::point(doc.rope.line_to_char(k as usize));
+        doc.selection = Selection::point(doc.rope.line_to_char(k));
         self.refresh_tests_page();
         self.preview_test();
     }
@@ -1420,7 +1444,7 @@ impl Editor {
         let Some((p, i)) = self.tests_page() else {
             return;
         };
-        let (text, rows) = self.tests_text();
+        let (text, rows, boxes) = self.tests_text();
         let line = rows
             .iter()
             .position(|r| r.as_ref() == Some(row))
@@ -1428,6 +1452,7 @@ impl Editor {
         let doc = &mut self.panes[p].docs[i];
         doc.rope = Rope::from_str(&text);
         doc.syntax.set_lang(Lang::Tests);
+        doc.boxes = boxes;
         doc.selection = Selection::point(doc.rope.line_to_char(line));
         self.tests.rows = rows;
     }
@@ -1547,47 +1572,7 @@ pub(super) fn tidy_failure(text: &str, root: Option<&Path>) -> String {
         .join("\n")
 }
 
-/// Split `text` into lines of at most `width` chars, breaking at spaces where possible.
-pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.is_empty() {
-            out.push(String::new());
-            continue;
-        }
-        // Continuation lines keep the original indentation.
-        let indent = chars
-            .iter()
-            .take_while(|c| **c == ' ')
-            .count()
-            .min(width / 2);
-        let mut start = 0;
-        let mut first = true;
-        while start < chars.len() {
-            let avail = if first { width } else { width - indent };
-            let mut end = (start + avail).min(chars.len());
-            // Break at the last space, unless that leaves a very short line (a long path
-            // after `at` is better split mid-path than moved whole to the next line).
-            if end < chars.len()
-                && let Some(sp) = chars[start..end].iter().rposition(|c| *c == ' ')
-                && sp > avail / 2
-            {
-                end = start + sp + 1;
-            }
-            let piece: String = chars[start..end].iter().collect();
-            let piece = piece.trim_end().to_string();
-            out.push(if first {
-                piece
-            } else {
-                format!("{}{}", " ".repeat(indent), piece.trim_start())
-            });
-            first = false;
-            start = end;
-        }
-    }
-    out
-}
+pub(super) use super::page::wrap_text;
 
 pub fn status_glyph(s: Status) -> char {
     match s {
@@ -1612,7 +1597,7 @@ mod tests {
 
     /// A JS project with one spec file, opened as a workspace.
     fn project(name: &str) -> (Editor, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("jmx-tx-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-tx-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("tests")).unwrap();
         let dir = fs::canonicalize(dir).unwrap();
@@ -1624,6 +1609,8 @@ mod tests {
         let spec = dir.join("tests/a.spec.js");
         fs::write(&spec, SPEC).unwrap();
         let mut ed = Editor::new(Config::default(), &[]);
+        // A wide panel: rows stay on one line each.
+        ed.panes[crate::editor::PANEL].cols = 200;
         let mut ws = Workspace::new(name);
         ws.folders.push(dir.clone());
         ed.workspace = Some(ws);
@@ -1803,7 +1790,7 @@ mod tests {
         assert_eq!(
             body,
             [
-                "▾ ○ jmx-tx-fold-".to_string()
+                "▾ ○ jdc-tx-fold-".to_string()
                     + &std::process::id().to_string()
                     + "  (Vitest)  0/3 passed",
                 "  ▾ ○ tests/a.spec.js  (3)".into(),
@@ -1901,7 +1888,7 @@ mod tests {
 
     #[test]
     fn gitignored_files_are_never_tests() {
-        let dir = std::env::temp_dir().join(format!("jmx-tx-ignored-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-tx-ignored-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         for d in ["tests", "generated", "node_modules/pkg/test"] {
             fs::create_dir_all(dir.join(d)).unwrap();
@@ -2039,7 +2026,7 @@ mod tests {
         assert_eq!(wrap_text("alpha beta gamma", 11), ["alpha beta", "gamma"]);
         assert_eq!(
             wrap_text("    at /a/very/long/path/file.js:1:2", 16),
-            ["    at /a/very/l", "    ong/path/fil", "    e.js:1:2"]
+            ["    at /a/very/", "    long/path/", "    file.js:1:2"]
         );
         assert_eq!(wrap_text("x\n\ny", 10), ["x", "", "y"]);
     }
@@ -2049,7 +2036,7 @@ mod tests {
     fn opening_a_workspace_lints_the_whole_project() {
         use crate::lint::eslint::Scope;
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("jmx-tx-autolint-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-tx-autolint-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
         fs::create_dir_all(dir.join("src")).unwrap();

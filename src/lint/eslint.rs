@@ -68,7 +68,7 @@ pub fn roots_in(folder: &Path) -> Vec<PathBuf> {
 }
 
 pub fn find_eslint(root: &Path) -> Option<PathBuf> {
-    process::find_node_tool("eslint", "JMX_ESLINT", root)
+    process::find_node_tool("eslint", "JDC_ESLINT", root)
 }
 
 // ESLint's `--format json` output.
@@ -238,7 +238,7 @@ impl LintJob {
         let (tx, rx) = mpsc::channel();
         let what = format!("{scope:?}");
         std::thread::Builder::new()
-            .name("jmx-eslint".into())
+            .name("jdc-eslint".into())
             .spawn(move || {
                 let started = Instant::now();
                 let result = work();
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn finds_config_roots() {
-        let dir = std::env::temp_dir().join(format!("jmx-eslroot-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-eslroot-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("web/src/deep")).unwrap();
         fs::create_dir_all(dir.join("api")).unwrap();

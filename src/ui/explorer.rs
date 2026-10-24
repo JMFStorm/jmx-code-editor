@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn expand_collapse_and_navigate() {
-        let dir = std::env::temp_dir().join(format!("jmx-expl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-expl-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src/utils")).unwrap();
         fs::write(dir.join("src/utils/csv.js"), "").unwrap();

@@ -14,12 +14,12 @@ fi
 # Version from the [package] section of Cargo.toml.
 VERSION=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | head -n1)
 
-echo "==> Building jmx $VERSION (Linux x86_64, release)"
+echo "==> Building jdc $VERSION (Linux x86_64, release)"
 cargo build --release --target "$TARGET" "$@"
 
 mkdir -p dist
-OUT="dist/jmx-$VERSION-linux-x86_64"
-cp "target/$TARGET/release/jmx" "$OUT"
+OUT="dist/jdc-$VERSION-linux-x86_64"
+cp "target/$TARGET/release/jdc" "$OUT"
 
 echo
 echo "Done: $(pwd)/$OUT ($(du -h "$OUT" | cut -f1))"

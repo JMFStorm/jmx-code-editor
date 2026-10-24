@@ -71,7 +71,7 @@ impl TestJob {
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
         std::thread::Builder::new()
-            .name("jmx-tests".into())
+            .name("jdc-tests".into())
             .spawn(move || {
                 let started = Instant::now();
                 let report = run(&req, &stop);
@@ -116,14 +116,14 @@ impl TestJob {
 fn temp_report(ext: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     std::env::temp_dir().join(format!(
-        "jmx-tests-{}-{}.{ext}",
+        "jdc-tests-{}-{}.{ext}",
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
 pub fn find_dotnet() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("JMX_DOTNET").filter(|p| !p.is_empty()) {
+    if let Some(p) = std::env::var_os("JDC_DOTNET").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
     let name = if cfg!(windows) {
@@ -151,9 +151,9 @@ fn run(req: &Request, cancel: &AtomicBool) -> Report {
 fn run_js(req: &Request, cancel: &AtomicBool) -> Report {
     let vitest = req.project.runner == Some(Framework::Vitest);
     let (tool, env) = if vitest {
-        ("vitest", "JMX_VITEST")
+        ("vitest", "JDC_VITEST")
     } else {
-        ("jest", "JMX_JEST")
+        ("jest", "JDC_JEST")
     };
     let Some(bin) = process::find_node_tool(tool, env, &req.project.root) else {
         return Report {

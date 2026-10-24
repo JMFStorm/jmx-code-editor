@@ -47,10 +47,10 @@ pub fn prettier_supports(path: &Path) -> bool {
     )
 }
 
-/// The Prettier executable to use for a file in `dir`: `$JMX_PRETTIER`, else the nearest
+/// The Prettier executable to use for a file in `dir`: `$JDC_PRETTIER`, else the nearest
 /// project-local `node_modules/.bin/prettier`, else one on `PATH`.
 pub fn find_prettier(dir: &Path) -> Option<PathBuf> {
-    process::find_node_tool("prettier", "JMX_PRETTIER", dir)
+    process::find_node_tool("prettier", "JDC_PRETTIER", dir)
 }
 
 /// Trim trailing blanks on every line and end the text with exactly one newline (an empty
@@ -113,7 +113,7 @@ impl FormatJob {
         let (tx, rx) = mpsc::channel();
         let file = path.clone();
         std::thread::Builder::new()
-            .name("jmx-format".into())
+            .name("jdc-format".into())
             .spawn(move || {
                 let started = Instant::now();
                 let outcome = run_steps(&steps, &file, text);
@@ -245,7 +245,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn prettier_then_eslint_fixes() {
-        let dir = std::env::temp_dir().join(format!("jmx-fmt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-fmt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.js");

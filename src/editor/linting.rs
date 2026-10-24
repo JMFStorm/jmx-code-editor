@@ -6,11 +6,13 @@ use std::time::Duration;
 
 use ropey::Rope;
 
+use super::page::{PageBox, PageText};
 use super::selection::Selection;
 use super::{EDITOR, Editor, PANEL};
 use crate::lint::eslint::{self, LintJob, Scope};
 use crate::lint::{Diagnostic, Severity, Source};
 use crate::syntax::Lang;
+use crate::syntax::Token;
 
 /// Title of the Problems page.
 pub const PROBLEMS_TITLE: &str = "Problems";
@@ -22,9 +24,25 @@ pub(super) const LINT_POLL: Duration = Duration::from_millis(16);
 struct ProblemsPage {
     text: String,
     rows: Vec<Option<Target>>,
+    boxes: Vec<PageBox>,
     chips: [(usize, usize); 3],
+    /// The line the chips are on.
+    chips_line: usize,
     /// Lines of the message box and the problem's severity.
     detail: Option<(usize, usize, Severity)>,
+}
+
+/// The place a list (References, Problems, F4, Go to Definition) just showed in the
+/// editor, highlighted there until the text changes or the cursor leaves its line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub path: PathBuf,
+    pub line: usize,
+    /// Char columns of the highlighted range.
+    pub start_col: usize,
+    pub end_col: usize,
+    /// The document's revision when shown.
+    pub revision: u64,
 }
 
 /// A location a Problems row points at.
@@ -193,10 +211,16 @@ impl Editor {
 
     /// Open (or switch to) the Problems page in the panel.
     pub(super) fn show_problems(&mut self) {
+        // F4 walks problems again.
+        self.refs.f4 = false;
         let page = self.problems_text();
         self.open_virtual(PROBLEMS_TITLE, &page.text);
+        if let Some((p, i)) = self.problems_page() {
+            self.panes[p].docs[i].boxes = page.boxes.clone();
+        }
         self.problem_rows = page.rows;
         self.problem_chips = page.chips;
+        self.problem_chips_line = page.chips_line;
         self.problem_detail = page.detail;
         if let Some((p, i)) = self.problems_page() {
             self.panes[p].docs[i].syntax.set_lang(Lang::Problems);
@@ -223,6 +247,7 @@ impl Editor {
         let keep = self.problem_rows.get(line).cloned().flatten();
         let page = self.problems_text();
         self.problem_chips = page.chips;
+        self.problem_chips_line = page.chips_line;
         // Box lines come after their row, so the first match is the problem's own row.
         let new_line = keep
             .and_then(|t| page.rows.iter().position(|r| r.as_ref() == Some(&t)))
@@ -235,6 +260,7 @@ impl Editor {
         }
         let line = new_line.min(doc.rope.len_lines().saturating_sub(1));
         doc.selection = Selection::point(doc.rope.line_to_char(line));
+        doc.boxes = page.boxes;
         self.problem_rows = page.rows;
         self.problem_detail = page.detail;
     }
@@ -266,20 +292,20 @@ impl Editor {
             show.push_str("  ");
         }
         show.push_str(" e / w / m toggle · Enter open · F4 next");
-        let mut lines: Vec<(String, Option<Target>)> = vec![
-            (
-                format!(
-                    "Problems: {e} error{} · {w} warning{} · {i} message{}{busy}",
-                    plural(e),
-                    plural(w),
-                    plural(i)
-                ),
-                None,
+        let mut page: PageText<Target> = PageText::new(self.panel_width());
+        page.wrapped(
+            &format!(
+                "Problems: {e} error{} · {w} warning{} · {i} message{}{busy}",
+                plural(e),
+                plural(w),
+                plural(i)
             ),
-            (show, None),
-            (String::new(), None),
-        ];
-        let width = self.panes[PANEL].cols;
+            2,
+            None,
+        );
+        let chips_line = page.len();
+        page.wrapped(&show, 7, None);
+        page.line("", None);
         let mut detail: Option<(usize, usize, Severity)> = None;
         let visible: Vec<(&PathBuf, Vec<&Diagnostic>)> = self
             .problems
@@ -295,17 +321,18 @@ impl Editor {
             .filter(|(_, d)| !d.is_empty())
             .collect();
         if self.problems.is_empty() {
-            lines.push(("No problems found.".into(), None));
+            page.line("No problems found.", None);
         } else if !(f.errors || f.warnings || f.infos) {
-            lines.push(("All problem types are hidden (e / w / m)".into(), None));
+            page.line("All problem types are hidden (e / w / m)", None);
         } else if visible.is_empty() {
-            lines.push(("No problems of the shown types.".into(), None));
+            page.line("No problems of the shown types.", None);
         }
         for (path, diags) in visible {
-            lines.push((
-                format!("{}  ({})", self.display_path(path), diags.len()),
+            page.wrapped(
+                &format!("{}  ({})", self.display_path(path), diags.len()),
+                0,
                 None,
-            ));
+            );
             for d in diags {
                 let mark = match d.severity {
                     Severity::Error => '✖',
@@ -320,48 +347,33 @@ impl Editor {
                 // Compact row: position, rule and source; the message goes in the box.
                 let what = match &d.code {
                     Some(c) => c.clone(),
-                    None => {
-                        let first = d.message.lines().next().unwrap_or("");
-                        let max = width.saturating_sub(24).max(20);
-                        if first.chars().count() > max {
-                            format!("{}…", first.chars().take(max).collect::<String>())
-                        } else {
-                            first.to_string()
-                        }
-                    }
+                    None => d.message.lines().next().unwrap_or("").to_string(),
                 };
-                lines.push((
-                    format!(
-                        "  {mark} {}:{}  {what}  · {}",
-                        d.line + 1,
-                        d.col + 1,
-                        d.source.name()
-                    ),
+                let pos = format!("{}:{}", d.line + 1, d.col + 1);
+                page.wrapped(
+                    &format!("  {mark} {pos}  {what}  · {}", d.source.name()),
+                    6 + pos.chars().count(),
                     Some(target.clone()),
-                ));
+                );
                 // The selected problem shows its whole message in a box underneath.
                 if selected.as_ref() == Some(&target) && detail.is_none() {
-                    let first = lines.len();
-                    let indent = 4;
-                    for l in super::testing::wrap_text(
-                        d.message.trim(),
-                        width.saturating_sub(indent + 3).max(20),
-                    ) {
-                        lines.push((format!("{}│ {l}", " ".repeat(indent)), Some(target.clone())));
-                    }
-                    detail = Some((first, lines.len() - 1, d.severity));
+                    let accent = match d.severity {
+                        Severity::Error => Token::Error,
+                        Severity::Warning => Token::Warning,
+                        Severity::Info => Token::Function,
+                    };
+                    let (a, b) =
+                        page.boxed(d.message.trim(), 4, Some(target.clone()), Some(accent));
+                    detail = Some((a, b, d.severity));
                 }
             }
         }
-        let text = lines
-            .iter()
-            .map(|(l, _)| l.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
         ProblemsPage {
-            text,
-            rows: lines.into_iter().map(|(_, t)| t).collect(),
+            text: page.text(),
+            rows: page.rows,
+            boxes: page.boxes,
             chips,
+            chips_line,
             detail,
         }
     }
@@ -382,6 +394,7 @@ impl Editor {
             self.problem_detail
                 .is_some_and(|(a, b, _)| k >= a && k <= b)
         };
+        let here = self.problem_rows.get(line as usize).cloned().flatten();
         let mut k = line;
         loop {
             k += delta;
@@ -389,12 +402,18 @@ impl Editor {
                 return;
             }
             let k = k as usize;
-            if self.problem_rows[k].is_some() && !in_box(k) {
+            // Another problem's row (wrapped rows span several lines).
+            if self.problem_rows[k].is_some() && !in_box(k) && self.problem_rows[k] != here {
                 break;
             }
         }
+        // Its first line.
+        let mut k = k as usize;
+        while k > 0 && self.problem_rows[k - 1] == self.problem_rows[k] && !in_box(k - 1) {
+            k -= 1;
+        }
         let doc = self.doc_mut();
-        doc.selection = Selection::point(doc.rope.line_to_char(k as usize));
+        doc.selection = Selection::point(doc.rope.line_to_char(k));
         self.refresh_problems_page();
         self.preview_problem();
     }
@@ -437,7 +456,7 @@ impl Editor {
     pub(super) fn problems_chip_click(&mut self) -> bool {
         let doc = self.doc();
         let line = doc.rope.char_to_line(doc.selection.head);
-        if line != 1 {
+        if line != self.problem_chips_line {
             return false;
         }
         let col = doc.selection.head - doc.rope.line_to_char(line);
@@ -525,6 +544,13 @@ impl Editor {
             self.preview_doc = Some(t.path.clone());
         }
         let rows = self.panes[EDITOR].rows;
+        // A problem at this spot marks its own range; anything else the word there.
+        let problem_end = self
+            .problems
+            .for_file(&t.path)
+            .iter()
+            .find(|d| d.line == t.line && d.col == t.col && d.end_line == d.line)
+            .map(|d| d.end_col);
         let pane = &mut self.panes[EDITOR];
         if let Some(doc) = pane.docs.get_mut(pane.active)
             && doc.canonical.as_deref() == Some(t.path.as_path())
@@ -532,7 +558,22 @@ impl Editor {
             let line = t.line.min(doc.rope.len_lines().saturating_sub(1));
             let start = doc.rope.line_to_char(line);
             let len = super::movement::line_content_end(&doc.rope, line) - start;
-            doc.selection = Selection::point(start + t.col.min(len));
+            let col = t.col.min(len);
+            let end_col = match problem_end {
+                Some(e) if e > col => e.min(len),
+                _ => match super::symbols::word_at(&doc.rope, start + col) {
+                    Some((ws, we, _)) if ws == start + col => we - start,
+                    _ => len,
+                },
+            };
+            self.located = Some(Located {
+                path: t.path.clone(),
+                line,
+                start_col: col,
+                end_col: end_col.max(col + 1).min(len.max(col + 1)),
+                revision: doc.revision,
+            });
+            doc.selection = Selection::point(start + col);
             doc.collapse_extra();
             doc.history.break_coalescing();
             doc.view.top_line = line.saturating_sub(rows / 3);
@@ -671,7 +712,7 @@ mod tests {
 
     /// Each test gets its own folder: tests run in parallel.
     fn setup(name: &str) -> (Editor, PathBuf, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("jmx-problems-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-problems-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(dir).unwrap();
@@ -761,11 +802,18 @@ mod tests {
         ed.problems.set_file(Source::Eslint, &a, vec![long]);
         ed.execute(Command::ShowProblems);
         let text = ed.doc().rope.to_string();
-        let row = text.lines().find(|l| l.contains("2:3")).unwrap();
-        assert!(
-            row.contains("word word") && row.contains('…') && row.ends_with("· ESLint"),
-            "{row}"
-        );
+        // The row wraps (no `…`): its lines fit the panel, the source ends the last one.
+        let width = ed.panel_width();
+        let at = ed.problem_rows.iter().position(Option::is_some).unwrap();
+        let span = ed.problem_rows[at..]
+            .iter()
+            .take_while(|r| **r == ed.problem_rows[at])
+            .count();
+        assert!(span > 1, "{text}");
+        let lines: Vec<&str> = text.lines().skip(at).take(span).collect();
+        assert!(lines.iter().all(|l| l.chars().count() <= width), "{text}");
+        assert!(lines[0].contains("2:3  word word") && lines[span - 1].ends_with("· ESLint"));
+        assert!(!text.contains('…'));
         // F4 from the editor lands on it and opens the box, wrapped to the panel.
         ed.execute(Command::FocusLeft);
         ed.execute(Command::NextProblem);
@@ -848,6 +896,18 @@ mod tests {
         ed.execute(Command::PrevProblem); // wraps back
         assert_eq!(ed.doc().canonical.as_deref(), Some(b.as_path()));
         assert_eq!(ed.cursor_diagnostic().unwrap().message, "warn b0");
+        // The problem's own range is marked in the editor (diag cols 2..4).
+        ed.show_location(
+            &Target {
+                path: a.clone(),
+                line: 1,
+                col: 2,
+            },
+            true,
+        );
+        let shown = ed.panes[EDITOR].doc().unwrap();
+        let loc = ed.located_in(shown).expect("highlighted");
+        assert_eq!((loc.start_col, loc.end_col), (2, 4));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

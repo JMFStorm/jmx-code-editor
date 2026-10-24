@@ -8,23 +8,22 @@
   "respect_gitignore": true,
   "state": {
     "split": true,
-    "split_ratio": 0.6762038,
+    "split_ratio": 0.59759057,
     "focus": 0,
     "font_size": 15.0,
     "explorer": {
-      "visible": true,
-      "width_cols": 37.0,
+      "visible": false,
+      "width_cols": 33.0,
       "expanded": [
         "sandbox/dotnet-inventory",
         "sandbox/dotnet-inventory/src",
         "sandbox/dotnet-inventory/src/Inventory.Api",
-        "sandbox/dotnet-inventory/src/Inventory.Api/Models",
-        "sandbox/vue-dashboard"
+        "sandbox/dotnet-inventory/src/Inventory.Api/Services"
       ]
     },
     "panes": [
       {
-        "active": 3,
+        "active": 4,
         "tabs": [
           {
             "kind": "file",
@@ -37,28 +36,37 @@
           },
           {
             "kind": "file",
-            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Services/ProductService.cs",
-            "anchor": 2723,
-            "head": 2723,
-            "top_line": 62,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Services/IProductService.cs",
-            "anchor": 1434,
-            "head": 1434,
-            "top_line": 12,
+            "path": "sandbox/vue-dashboard/src/components/SalesChart.vue",
+            "anchor": 739,
+            "head": 739,
+            "top_line": 0,
             "left_col": 0,
             "unsaved": null
           },
           {
             "kind": "file",
             "path": "sandbox/dotnet-inventory/src/Inventory.Api/Models/Product.cs",
-            "anchor": 559,
-            "head": 559,
-            "top_line": 0,
+            "anchor": 1044,
+            "head": 1044,
+            "top_line": 24,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Data/InventoryDbContext.cs",
+            "anchor": 1755,
+            "head": 1755,
+            "top_line": 17,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Services/IProductService.cs",
+            "anchor": 802,
+            "head": 802,
+            "top_line": 2,
             "left_col": 0,
             "unsaved": null
           }
@@ -80,7 +88,7 @@
       }
     ],
     "search": {
-      "query": "ProblemDetails",
+      "query": "USer",
       "include": "",
       "options": {
         "case_sensitive": false,

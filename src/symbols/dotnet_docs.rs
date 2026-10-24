@@ -1024,7 +1024,7 @@ mod tests {
 "#;
 
     fn docs(name: &str) -> (DotnetDocs, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("jmx-dnd-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-dnd-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("Fake.xml");

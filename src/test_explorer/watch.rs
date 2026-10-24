@@ -27,7 +27,7 @@ fn ignored(path: &Path) -> bool {
         )
     }) || path
         .file_name()
-        .is_some_and(|n| n.to_string_lossy().ends_with(".jmx-tmp"))
+        .is_some_and(|n| n.to_string_lossy().ends_with(".jdc-tmp"))
 }
 
 impl FsWatcher {
@@ -79,13 +79,13 @@ mod tests {
     fn ignores_build_and_dependency_folders() {
         assert!(ignored(Path::new("/w/node_modules/x/a.js")));
         assert!(ignored(Path::new("/w/src/Api/obj/Debug/a.cs")));
-        assert!(ignored(Path::new("/w/.a.js.jmx-tmp")));
+        assert!(ignored(Path::new("/w/.a.js.jdc-tmp")));
         assert!(!ignored(Path::new("/w/src/a.spec.js")));
     }
 
     #[test]
     fn reports_changes() {
-        let dir = std::env::temp_dir().join(format!("jmx-watch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-watch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(dir).unwrap();

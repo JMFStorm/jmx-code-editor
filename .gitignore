@@ -5,7 +5,7 @@
 /sandbox/
 
 # Editor atomic-save temp files
-*.jmx-tmp
+*.jdc-tmp
 
 # IDE / OS clutter
 .idea/

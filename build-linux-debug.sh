@@ -8,8 +8,8 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> Building jmx (Linux, debug)"
+echo "==> Building jdc (Linux, debug)"
 cargo build "$@"
 
 echo
-echo "Done: $(pwd)/target/debug/jmx"
+echo "Done: $(pwd)/target/debug/jdc"

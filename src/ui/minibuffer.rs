@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn completion() {
-        let dir = std::env::temp_dir().join(format!("jmx-mb-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-mb-{}", std::process::id()));
         fs::create_dir_all(dir.join("subdir")).unwrap();
         fs::write(dir.join("alpha.txt"), "").unwrap();
         fs::write(dir.join("alpine.txt"), "").unwrap();

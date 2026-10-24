@@ -43,7 +43,7 @@ pub struct Hover {
 
 /// Word-wrap popup text to `width` columns.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
-    super::testing::wrap_text(text, width.max(10))
+    super::page::wrap_text(text, width.max(10))
 }
 
 /// What the mouse rests on: a view's line, and the column (`None`: the gutter).
@@ -110,6 +110,13 @@ pub fn tab_title(ed: &Editor, doc: &super::document::Document) -> TabTitle {
                 }
             }
             t
+        }
+        Some(super::REFERENCES_TITLE) => {
+            if ed.refs.running() {
+                TabTitle::icon(super::linting::spinner(), HoverKind::Text, "References")
+            } else {
+                TabTitle::plain(format!("References ({})", ed.refs.count()))
+            }
         }
         Some(super::TESTS_TITLE) => {
             let (passed, failed, not_run, running) = ed.tests.tree.counts();
@@ -269,12 +276,16 @@ impl Editor {
         let doc = self.doc();
         let line = doc.rope.char_to_line(doc.selection.head);
         let col = doc.selection.head - doc.rope.line_to_char(line);
-        let target = HoverTarget {
+        let at = |col: usize| HoverTarget {
             pane: self.focus,
             line,
             col: Some(col),
         };
-        match self.hover_lines(target) {
+        // The cursor right after a name counts as on it (like F12).
+        let lines = self
+            .hover_lines(at(col))
+            .or_else(|| col.checked_sub(1).and_then(|c| self.hover_lines(at(c))));
+        match lines {
             Some(lines) => {
                 self.hover = Some(Hover {
                     at: HoverAt::Cell {
@@ -302,7 +313,7 @@ mod tests {
 
     #[test]
     fn finds_test_failures_and_problems() {
-        let dir = std::env::temp_dir().join(format!("jmx-hover-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-hover-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(dir).unwrap();

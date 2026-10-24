@@ -34,7 +34,7 @@ impl AppState {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         }
-        let tmp = path.with_extension("json.jmx-tmp");
+        let tmp = path.with_extension("json.jdc-tmp");
         fs::write(&tmp, serde_json::to_string_pretty(self)? + "\n")
             .with_context(|| format!("cannot write {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))
@@ -47,12 +47,12 @@ mod tests {
 
     #[test]
     fn round_trip_and_bad_files() {
-        let dir = std::env::temp_dir().join(format!("jmx-state-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-state-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("sub/state.json");
         assert_eq!(AppState::load(&path), AppState::default());
         let s = AppState {
-            last_workspace: Some("/w/p.jmxws".into()),
+            last_workspace: Some("/w/p.jdcws".into()),
         };
         s.save(&path).unwrap();
         assert_eq!(AppState::load(&path), s);

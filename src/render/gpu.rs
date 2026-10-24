@@ -55,7 +55,7 @@ async fn open_device(
     log::info!("GPU adapter: {:?}", adapter.get_info());
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("jmx device"),
+            label: Some("jdc device"),
             required_limits: wgpu::Limits::downlevel_webgl2_defaults()
                 .using_resolution(adapter.limits()),
             ..Default::default()

@@ -75,7 +75,7 @@ pub fn run(editor: Editor, opts: HeadlessOptions) -> i32 {
         Ok(r) => r,
         Err(e) => {
             log::error!("headless GPU initialization failed: {e:#}");
-            eprintln!("jmx: headless GPU initialization failed: {e:#}");
+            eprintln!("jdc: headless GPU initialization failed: {e:#}");
             return EXIT_NO_GPU;
         }
     };
@@ -88,7 +88,7 @@ pub fn run(editor: Editor, opts: HeadlessOptions) -> i32 {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(BufReader::new(f)),
             Err(e) => {
-                eprintln!("jmx: cannot open script {}: {e}", path.display());
+                eprintln!("jdc: cannot open script {}: {e}", path.display());
                 return EXIT_SCRIPT_ERROR;
             }
         },
@@ -105,7 +105,7 @@ pub fn run(editor: Editor, opts: HeadlessOptions) -> i32 {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("jmx: error reading script: {e}");
+                eprintln!("jdc: error reading script: {e}");
                 return EXIT_SCRIPT_ERROR;
             }
         };
@@ -549,6 +549,22 @@ pub fn state_json(session: &Session) -> String {
     let hover = opt(ed.hover.as_ref().map(popup));
     let signature = opt(ed.symbols.signature.as_ref().map(popup));
     let opened_url = opt(ed.opened_url.as_deref().map(json_str));
+    let located = opt(ed.panes[crate::editor::EDITOR].doc().and_then(|d| {
+        let l = ed.located_in(d)?;
+        let name = l.path.file_name()?.to_string_lossy().into_owned();
+        Some(json_str(&format!(
+            "{name}:{}:{}-{}",
+            l.line + 1,
+            l.start_col + 1,
+            l.end_col + 1
+        )))
+    }));
+    let references = format!(
+        "{{\"count\":{},\"files\":{},\"running\":{}}}",
+        ed.refs.count(),
+        ed.refs.results.len(),
+        ed.refs.running()
+    );
     let menu = session.open_menu_id().map(|m| json_str(&format!("{m:?}")));
     let prompt = ed.minibuffer.as_ref().map(|m| json_str(&m.input));
     let message = ed.message.as_ref().map(|m| json_str(&m.text));
@@ -557,7 +573,7 @@ pub fn state_json(session: &Session) -> String {
 \"active\":{},\"tabs\":[{}],\"panes\":[{}],\"path\":{},\"dirty\":{},\"read_only\":{},\
 \"line\":{},\"col\":{},\"selection\":{},\"cursors\":{},\"lang\":{},\"line_text\":{},\"lines\":{},\"indent\":{},\
 \"line_ending\":{},\"picker\":{},\"prompt\":{},\"message\":{},\"font_size\":{},\
-\"workspace\":{},\"explorer\":{explorer},\"find\":{find},\"formatting\":{},\"problems\":{problems},\"tests\":{tests},\"hover\":{hover},\"signature\":{signature},\"opened_url\":{opened_url}}}",
+\"workspace\":{},\"explorer\":{explorer},\"find\":{find},\"formatting\":{},\"problems\":{problems},\"tests\":{tests},\"hover\":{hover},\"signature\":{signature},\"opened_url\":{opened_url},\"references\":{references},\"located\":{located}}}",
         json_str(frame::mode_label(ed)),
         ed.focus,
         ed.split,

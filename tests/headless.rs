@@ -8,17 +8,17 @@ use std::process::{Command, Output};
 const EXIT_NO_GPU: i32 = 3;
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("jmx-it-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("jdc-it-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-/// Run `jmx --headless` with `script`; `None` means no GPU (test should be skipped).
+/// Run `jdc --headless` with `script`; `None` means no GPU (test should be skipped).
 fn run(dir: &Path, script: &str, files: &[&Path]) -> Option<Output> {
-    let script_path = dir.join("test.jmxs");
+    let script_path = dir.join("test.jdcs");
     fs::write(&script_path, script).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+    let out = Command::new(env!("CARGO_BIN_EXE_jdc"))
         .arg("--headless")
         .arg("--size=640x400")
         .arg("--log-dir")
@@ -27,14 +27,14 @@ fn run(dir: &Path, script: &str, files: &[&Path]) -> Option<Output> {
         .arg(&script_path)
         .args(files)
         .output()
-        .expect("failed to start jmx");
+        .expect("failed to start jdc");
     if out.status.code() == Some(EXIT_NO_GPU) {
         eprintln!("skipping: no GPU adapter available for headless rendering");
         return None;
     }
     assert!(
         out.status.success(),
-        "jmx failed: {}\nstderr:\n{}",
+        "jdc failed: {}\nstderr:\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
@@ -85,12 +85,12 @@ fn edit_save_state_and_screenshot() {
 #[test]
 fn script_errors_report_line_numbers() {
     let dir = temp_dir("err");
-    fs::write(dir.join("test.jmxs"), "state\nfrobnicate\n").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+    fs::write(dir.join("test.jdcs"), "state\nfrobnicate\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_jdc"))
         .args(["--headless", "--size=320x200", "--log-dir"])
         .arg(dir.join("logs"))
         .arg("--script")
-        .arg(dir.join("test.jmxs"))
+        .arg(dir.join("test.jdcs"))
         .output()
         .unwrap();
     if out.status.code() == Some(EXIT_NO_GPU) {
@@ -119,9 +119,9 @@ fn each_launch_rotates_logs() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, ["jmx-headless.log", "jmx-headless.prev.log"]);
-    let log = fs::read_to_string(dir.join("logs/jmx-headless.log")).unwrap();
-    assert!(log.starts_with("# jmx "), "{log}");
+    assert_eq!(names, ["jdc-headless.log", "jdc-headless.prev.log"]);
+    let log = fs::read_to_string(dir.join("logs/jdc-headless.log")).unwrap();
+    assert!(log.starts_with("# jdc "), "{log}");
     assert!(log.contains("headless session 640x400"), "{log}");
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -223,14 +223,14 @@ fn workspace_create_save_and_reopen() {
     let s = states(&out);
     assert_eq!(s.len(), 1, "{s:?}");
     assert!(s[0].contains("\"name\":\"demo\""), "{}", s[0]);
-    assert!(s[0].contains("demo.jmxws"), "{}", s[0]);
+    assert!(s[0].contains("demo.jdcws"), "{}", s[0]);
     assert!(s[0].contains("\"dirty\":true"), "{}", s[0]);
     assert!(
         !s[0].contains("node_modules"),
         "gitignored folder shown: {}",
         s[0]
     );
-    let ws_file = dir.join("demo.jmxws");
+    let ws_file = dir.join("demo.jdcws");
     assert!(ws_file.exists(), "workspace file not written");
     // The edit lives in the workspace, not on disk.
     assert_eq!(fs::read_to_string(&start).unwrap(), "let a = 1;\n");
@@ -263,7 +263,7 @@ fn quick_open_line_and_find_in_files() {
     fs::write(proj.join("src/csv.js"), "a\nb\nparse(Needle)\nneedle\n").unwrap();
     fs::write(proj.join("src/app.vue"), "<p>needle</p>\n").unwrap();
     fs::write(proj.join("src/app.js"), "one\ntwo\nthree\n").unwrap();
-    let ws = dir.join("p.jmxws");
+    let ws = dir.join("p.jdcws");
     fs::write(
         &ws,
         r#"{"version":1,"name":"p","folders":["proj"],"respect_gitignore":true}"#,
@@ -380,7 +380,7 @@ fn reopens_the_last_workspace() {
     let dir = temp_dir("restore");
     fs::create_dir_all(dir.join("proj")).unwrap();
     fs::write(dir.join("proj/a.js"), "const a = 1;\n").unwrap();
-    let ws = dir.join("p.jmxws");
+    let ws = dir.join("p.jdcws");
     fs::write(
         &ws,
         r#"{"version":1,"name":"p","folders":["proj"],"respect_gitignore":true}"#,
@@ -389,9 +389,9 @@ fn reopens_the_last_workspace() {
     let state = dir.join("state.json");
     let state_arg = format!("--state-file={}", state.display());
     let run_with = |script: &str, files: &[&Path]| {
-        let script_path = dir.join("restore.jmxs");
+        let script_path = dir.join("restore.jdcs");
         fs::write(&script_path, script).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+        let out = Command::new(env!("CARGO_BIN_EXE_jdc"))
             .args(["--headless", "--size=640x400", &state_arg])
             .arg("--log-dir")
             .arg(dir.join("logs"))
@@ -399,7 +399,7 @@ fn reopens_the_last_workspace() {
             .arg(&script_path)
             .args(files)
             .output()
-            .expect("failed to start jmx");
+            .expect("failed to start jdc");
         if out.status.code() == Some(EXIT_NO_GPU) {
             return None;
         }
@@ -414,7 +414,7 @@ fn reopens_the_last_workspace() {
     let Some(_) = run_with("key ctrl+p\ntype a.js\nkey enter\nquit\n", &[&ws]) else {
         return;
     };
-    assert!(fs::read_to_string(&state).unwrap().contains("p.jmxws"));
+    assert!(fs::read_to_string(&state).unwrap().contains("p.jdcws"));
     // No files given: the workspace comes back, with its tab.
     let out = run_with("state\nquit\n", &[]).unwrap();
     let s = states(&out);
@@ -455,9 +455,9 @@ fn ctrl_s_twice_formats_and_saves() {
                   key ctrl+s\n\
                   state\n\
                   quit\n";
-    let script_path = dir.join("fmt.jmxs");
+    let script_path = dir.join("fmt.jdcs");
     fs::write(&script_path, script).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+    let out = Command::new(env!("CARGO_BIN_EXE_jdc"))
         .args(["--headless", "--size=640x400"])
         .arg("--log-dir")
         .arg(dir.join("logs"))
@@ -465,9 +465,9 @@ fn ctrl_s_twice_formats_and_saves() {
         .arg(&script_path)
         .arg(&js)
         .arg(&cs)
-        .env("JMX_PRETTIER", &fake)
+        .env("JDC_PRETTIER", &fake)
         .output()
-        .expect("failed to start jmx");
+        .expect("failed to start jdc");
     if out.status.code() == Some(EXIT_NO_GPU) {
         return;
     }
@@ -537,18 +537,18 @@ fn eslint_problems_page_and_navigation() {
          quit\n",
         shot.display()
     );
-    let script_path = dir.join("lint.jmxs");
+    let script_path = dir.join("lint.jdcs");
     fs::write(&script_path, script).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+    let out = Command::new(env!("CARGO_BIN_EXE_jdc"))
         .args(["--headless", "--size=900x500"])
         .arg("--log-dir")
         .arg(dir.join("logs"))
         .arg("--script")
         .arg(&script_path)
         .arg(&a)
-        .env("JMX_ESLINT", &fake)
+        .env("JDC_ESLINT", &fake)
         .output()
-        .expect("failed to start jmx");
+        .expect("failed to start jdc");
     if out.status.code() == Some(EXIT_NO_GPU) {
         return;
     }
@@ -621,7 +621,7 @@ fn tests_view_runs_syncs_and_builds() {
         "namespace Api.Tests;\n\npublic class CalcTests\n{\n    [Fact]\n    public void Adds() { Assert.Equal(2, 1 + 1); }\n}\n",
     )
     .unwrap();
-    let ws = dir.join("w.jmxws");
+    let ws = dir.join("w.jdcws");
     fs::write(
         &ws,
         r#"{"version":1,"name":"w","folders":["web","Api.Tests"],"respect_gitignore":true}"#,
@@ -681,9 +681,9 @@ fn tests_view_runs_syncs_and_builds() {
                   wait\n\
                   state\n\
                   quit\n";
-    let script_path = dir.join("tv.jmxs");
+    let script_path = dir.join("tv.jdcs");
     fs::write(&script_path, script).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+    let out = Command::new(env!("CARGO_BIN_EXE_jdc"))
         .args(["--headless", "--size=900x500"])
         .arg("--log-dir")
         .arg(dir.join("logs"))
@@ -692,9 +692,9 @@ fn tests_view_runs_syncs_and_builds() {
         .arg(&ws)
         .arg(&spec)
         .arg(&cs)
-        .env("JMX_DOTNET", &dotnet)
+        .env("JDC_DOTNET", &dotnet)
         .output()
-        .expect("failed to start jmx");
+        .expect("failed to start jdc");
     if out.status.code() == Some(EXIT_NO_GPU) {
         return;
     }
@@ -778,7 +778,7 @@ fn panel_scrollbar_folding_and_paging() {
     }
     let file = dir.join("tests/a.spec.js");
     fs::write(&file, &spec).unwrap();
-    let ws = dir.join("w.jmxws");
+    let ws = dir.join("w.jdcws");
     fs::write(
         &ws,
         r#"{"version":1,"name":"w","folders":["."],"respect_gitignore":true}"#,
@@ -836,7 +836,7 @@ fn panel_scrollbar_folding_and_paging() {
 fn panel_pages_survive_restart_and_panel_menu() {
     let dir = temp_dir("panelpages");
     fs::write(dir.join("a.txt"), "hello\n").unwrap();
-    let ws = dir.join("w.jmxws");
+    let ws = dir.join("w.jdcws");
     fs::write(
         &ws,
         r#"{"version":1,"name":"w","folders":["."],"respect_gitignore":true}"#,

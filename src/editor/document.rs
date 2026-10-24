@@ -76,6 +76,8 @@ pub struct Document {
     pub canonical: Option<PathBuf>,
     /// Bumped on every text change (edits, undo, redo), to detect stale background results.
     pub revision: u64,
+    /// Boxes drawn behind lines of a panel page (messages, failures, docs).
+    pub boxes: Vec<super::page::PageBox>,
 }
 
 impl Document {
@@ -100,6 +102,7 @@ impl Document {
             virtual_name: None,
             syntax: Syntax::new(Lang::Plain),
             revision: 0,
+            boxes: Vec::new(),
             canonical: None,
         }
     }
@@ -186,7 +189,7 @@ impl Document {
             .context("invalid file name")?
             .to_string_lossy()
             .into_owned();
-        let tmp = target.with_file_name(format!(".{name}.jmx-tmp"));
+        let tmp = target.with_file_name(format!(".{name}.jdc-tmp"));
         fs::write(&tmp, self.to_bytes())
             .with_context(|| format!("cannot write {}", tmp.display()))?;
         if let Ok(meta) = fs::metadata(&target) {
@@ -574,7 +577,7 @@ mod tests {
 
     #[test]
     fn save_marker_survives_undo() {
-        let dir = std::env::temp_dir().join(format!("jmx-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("f.txt");
         fs::write(&path, "x\r\n").unwrap();
@@ -596,7 +599,7 @@ mod tests {
 
     #[test]
     fn revert_discards_changes_as_one_undo_step() {
-        let dir = std::env::temp_dir().join(format!("jmx-revert-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-revert-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("r.txt");
         fs::write(&path, "one\r\ntwo\r\n").unwrap();

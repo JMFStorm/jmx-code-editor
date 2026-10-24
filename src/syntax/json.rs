@@ -62,9 +62,9 @@ mod tests {
 
     #[test]
     fn keys_values_and_comments() {
-        let src = "{\n  \"name\": \"jmx\", \"n\": -1.5e3,\n  \"ok\": true, // note\n  /* a\n b */ \"x\": null\n}";
+        let src = "{\n  \"name\": \"jdc\", \"n\": -1.5e3,\n  \"ok\": true, // note\n  /* a\n b */ \"x\": null\n}";
         assert_eq!(token_of(Lang::Json, src, "\"name\""), Some(Token::Property));
-        assert_eq!(token_of(Lang::Json, src, "\"jmx\""), Some(Token::String));
+        assert_eq!(token_of(Lang::Json, src, "\"jdc\""), Some(Token::String));
         assert_eq!(token_of(Lang::Json, src, "-1.5e3"), Some(Token::Number));
         assert_eq!(token_of(Lang::Json, src, "true"), Some(Token::Literal));
         assert_eq!(token_of(Lang::Json, src, "// note"), Some(Token::Comment));

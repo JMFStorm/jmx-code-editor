@@ -10,10 +10,13 @@ pub use testing::{TESTS_TITLE, status_glyph};
 mod docs_page;
 pub mod movement;
 mod multi;
+pub mod page;
 pub mod search;
 pub mod selection;
 pub mod symbols;
 pub use docs_page::DOCS_TITLE;
+mod references;
+pub use references::REFERENCES_TITLE;
 pub mod view;
 
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
@@ -121,6 +124,10 @@ pub struct Editor {
     pub problem_filter: crate::lint::ProblemFilter,
     /// Columns of the Errors / Warnings / Messages chips on the Problems page (line 1).
     pub problem_chips: [(usize, usize); 3],
+    /// The line of the Problems page the chips are on.
+    pub problem_chips_line: usize,
+    /// The panel width its pages were last laid out at.
+    pub panel_layout_cols: usize,
     /// Page lines of the message box under the selected problem, and its severity.
     pub problem_detail: Option<(usize, usize, crate::lint::Severity)>,
     /// File opened only to preview a problem; the next preview replaces it.
@@ -133,6 +140,10 @@ pub struct Editor {
     pub hover: Option<hover::Hover>,
     /// Symbol index, parameter hints and Go Back history.
     pub symbols: symbols::SymbolState,
+    /// The place a list just showed in the editor (highlighted there).
+    pub located: Option<linting::Located>,
+    /// Find All References: the last search and its page.
+    pub refs: references::RefState,
     /// Open web pages in the browser (off for headless runs and tests).
     pub launch_urls: bool,
     /// The last web page opened (or that would have been).
@@ -174,12 +185,16 @@ impl Editor {
             problem_rows: Vec::new(),
             problem_filter: crate::lint::ProblemFilter::default(),
             problem_chips: [(0, 0); 3],
+            problem_chips_line: 1,
+            panel_layout_cols: 0,
             problem_detail: None,
             preview_doc: None,
             tests: testing::TestState::default(),
             revealed: None,
             hover: None,
             symbols: symbols::SymbolState::default(),
+            refs: references::RefState::default(),
+            located: None,
             launch_urls: !cfg!(test),
             opened_url: None,
             clipboard,
@@ -221,6 +236,16 @@ impl Editor {
     }
 
     /// True if the focused view has a document (views can be empty).
+    /// The highlighted shown place, if it is in `doc` and still current: same text, and the
+    /// cursor still on its line.
+    pub fn located_in(&self, doc: &document::Document) -> Option<&linting::Located> {
+        let l = self.located.as_ref()?;
+        (doc.canonical.as_deref() == Some(l.path.as_path())
+            && doc.revision == l.revision
+            && doc.rope.char_to_line(doc.selection.head) == l.line)
+            .then_some(l)
+    }
+
     pub fn has_doc(&self) -> bool {
         self.pane().doc().is_some()
     }
@@ -361,6 +386,10 @@ impl Editor {
     }
 
     pub fn execute(&mut self, cmd: Command) {
+        // Esc drops the highlight of a shown place.
+        if cmd == Command::Cancel && self.focus == EDITOR {
+            self.located = None;
+        }
         // Esc closes the parameter hints first.
         if cmd == Command::Cancel && self.symbols.signature.take().is_some() {
             self.hover = None;
@@ -392,6 +421,13 @@ impl Editor {
             Command::GoToDefinition if !overlay => return self.go_to_definition(),
             Command::GoBack if !overlay => return self.go_back(),
             Command::OpenDocsInBrowser if !overlay => return self.open_docs_in_browser(),
+            Command::FindAllReferences if !overlay => return self.find_all_references(),
+            // F4 walks the latest list: references after Shift+F12, else problems.
+            Command::NextProblem | Command::PrevProblem
+                if !overlay && self.refs.f4 && self.refs.count() > 0 =>
+            {
+                return self.step_reference(cmd == Command::NextProblem);
+            }
             _ => {}
         }
         if self.find.open && self.find_command(cmd) {
@@ -409,6 +445,15 @@ impl Editor {
         use Command::*;
         if !self.has_doc() && needs_doc(cmd) {
             return;
+        }
+        // The References page: Enter opens the reference, Up / Down preview them.
+        if self.on_references_page() {
+            match cmd {
+                Newline => return self.open_reference(),
+                Move(Motion::Up, false) => return self.references_step(-1),
+                Move(Motion::Down, false) => return self.references_step(1),
+                _ => {}
+            }
         }
         // The Docs page: Enter opens the API on the line, Backspace goes back.
         if self.on_docs_page() {
@@ -591,8 +636,14 @@ impl Editor {
             ZoomIn => self.zoom(self.config.font_size + 1.0),
             ZoomOut => self.zoom(self.config.font_size - 1.0),
             ZoomReset => self.zoom(self.config.default_font_size),
-            Help => self.open_virtual(help::HELP_TITLE, &help::help_text()),
-            ShowShortcuts => self.open_virtual(help::SHORTCUTS_TITLE, &help::shortcuts_text()),
+            Help => {
+                self.open_virtual(help::HELP_TITLE, &help::help_text());
+                self.refresh_static_pages();
+            }
+            ShowShortcuts => {
+                self.open_virtual(help::SHORTCUTS_TITLE, &help::shortcuts_text());
+                self.refresh_static_pages();
+            }
             FocusOtherView => self.focus_view(1 - self.focus),
             FocusLeft => self.focus_view(0),
             FocusRight => self.focus_view(1),
@@ -610,7 +661,8 @@ impl Editor {
             ResetSplit => self.split_ratio = 0.5,
             // Menus belong to the session (UI state); nothing to do here.
             // Handled before the match.
-            ShowHover | GoToDefinition | GoBack | SignatureHelp | OpenDocsInBrowser => {}
+            ShowHover | GoToDefinition | GoBack | SignatureHelp | OpenDocsInBrowser
+            | FindAllReferences => {}
             FileMenu | WorkspaceMenu | SelectionMenu | PanelMenu => {}
             ClosePanelTab => {
                 let index = self.panes[PANEL].active;
@@ -982,6 +1034,13 @@ impl Editor {
         }
         if self.on_tests_page() {
             self.tests_click(count >= 2);
+        }
+        if self.on_references_page() {
+            if count >= 2 {
+                self.open_reference();
+            } else {
+                self.preview_reference();
+            }
         }
     }
 
@@ -2352,7 +2411,7 @@ mod tests {
 
     #[test]
     fn opening_a_file_from_the_other_view_focuses_it() {
-        let dir = std::env::temp_dir().join(format!("jmx-ed-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-ed-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.txt");
         std::fs::write(&file, "hi").unwrap();

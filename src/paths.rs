@@ -11,13 +11,13 @@ fn env(key: &str) -> Option<PathBuf> {
 /// Folder for state that survives restarts (last workspace, logs).
 pub fn state_dir() -> Option<PathBuf> {
     if cfg!(windows) {
-        env("LOCALAPPDATA").map(|d| d.join("jmx"))
+        env("LOCALAPPDATA").map(|d| d.join("jdc"))
     } else if cfg!(target_os = "macos") {
-        env("HOME").map(|h| h.join("Library/Application Support/jmx"))
+        env("HOME").map(|h| h.join("Library/Application Support/jdc"))
     } else {
         env("XDG_STATE_HOME")
             .or_else(|| env("HOME").map(|h| h.join(".local/state")))
-            .map(|d| d.join("jmx"))
+            .map(|d| d.join("jdc"))
     }
 }
 

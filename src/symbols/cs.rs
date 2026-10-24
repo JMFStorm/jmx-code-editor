@@ -375,6 +375,7 @@ pub fn parse_xml_doc(xml: &str) -> Doc {
             .map(|c| c[1].to_string())
             .collect(),
         ty: String::new(),
+        ..Default::default()
     }
 }
 

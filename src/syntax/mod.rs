@@ -9,6 +9,7 @@ mod js;
 mod json;
 mod markup;
 mod problems;
+mod references;
 mod tests_page;
 
 use std::path::Path;
@@ -35,6 +36,8 @@ pub enum Lang {
     Tests,
     /// The Docs page (.NET API docs).
     Docs,
+    /// The References page.
+    References,
 }
 
 impl Lang {
@@ -45,7 +48,7 @@ impl Lang {
             .unwrap_or_default();
         let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
         match ext {
-            "json" | "jsonc" | "jmxws" => Lang::Json,
+            "json" | "jsonc" | "jdcws" => Lang::Json,
             "xml" | "svg" | "xsd" | "xsl" | "xslt" | "plist" | "csproj" | "props" => Lang::Xml,
             "html" | "htm" | "xhtml" => Lang::Html,
             "vue" => Lang::Vue,
@@ -68,6 +71,7 @@ impl Lang {
             Lang::CSharp => "C#",
             Lang::Problems => "Problems",
             Lang::Docs => "Docs",
+            Lang::References => "References",
             Lang::Tests => "Tests",
         }
     }
@@ -137,6 +141,7 @@ pub fn highlight_line(lang: Lang, state: &State, line: &str) -> (Vec<Span>, Stat
         Lang::Problems => problems::lex(&mut lx),
         Lang::Tests => tests_page::lex(&mut lx),
         Lang::Docs => docs_page::lex(&mut lx),
+        Lang::References => references::lex(&mut lx),
         Lang::Xml | Lang::Html | Lang::Vue => markup::lex(&mut lx, &mut st, lang),
     }
     (lx.spans, st)
@@ -347,6 +352,7 @@ mod tests {
             Lang::Problems,
             Lang::Tests,
             Lang::Docs,
+            Lang::References,
         ];
         let chars: Vec<char> = sample.chars().collect();
         for lang in langs {

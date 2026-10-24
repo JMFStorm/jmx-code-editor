@@ -110,6 +110,8 @@ pub enum Command {
     SignatureHelp,
     /// The web docs (Microsoft Learn / MDN) of the name at the cursor, after asking.
     OpenDocsInBrowser,
+    /// List every use of the name at the cursor in the workspace.
+    FindAllReferences,
     /// Run the test or suite at the cursor (or the selected Tests row).
     RunTestAtCursor,
     RunAllTests,
@@ -268,6 +270,7 @@ impl Command {
             GoBack => "Go back to where Go to Definition jumped from",
             SignatureHelp => "Show the parameter hints of the call at the cursor",
             OpenDocsInBrowser => "Open the web docs of the name at the cursor (asks first)",
+            FindAllReferences => "Find all references to the name at the cursor",
             RunTestAtCursor => "Run the test at the cursor",
             RunAllTests => "Run all tests",
             RunFailedTests => "Run failed tests",
@@ -334,7 +337,7 @@ impl Command {
             Find | FindNext | FindPrev | GotoLine | FindInFiles | NextResult | PrevResult
             | ToggleCase | ToggleWholeWord | ToggleRegex | LintWorkspace | ShowProblems
             | NextProblem | PrevProblem | ShowHover | GoToDefinition | GoBack | SignatureHelp
-            | OpenDocsInBrowser => Group::Search,
+            | OpenDocsInBrowser | FindAllReferences => Group::Search,
             ShowTests | RunTestAtCursor | RunAllTests | RunFailedTests | RefreshTests => {
                 Group::Tests
             }

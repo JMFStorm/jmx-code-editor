@@ -6,10 +6,10 @@ pub const SHORTCUTS_TITLE: &str = "Keyboard Shortcuts";
 pub fn help_text() -> String {
     format!(
         "\
-JMX {version} - lightweight GPU text editor
-============================================
+JDC {version} - Just Do Code Editor
+===================================
 
-JMX is a small, fast, dark-themed text editor. Everything can be done with the
+JDC is a small, fast, dark-themed text editor. Everything can be done with the
 keyboard alone, and the common actions also work with just the mouse.
 
 This page is read-only. Close it with Ctrl+W, search it with Ctrl+F.
@@ -39,7 +39,7 @@ Formatting
   Ctrl+S, S        hold Ctrl and press S twice: format the file, then save
   Shift+Alt+F      format the file without saving
 JavaScript, TypeScript, JSON, CSS/SCSS/Less, HTML, Vue, Markdown, YAML and
-GraphQL files are formatted with Prettier. JMX uses the project's own
+GraphQL files are formatted with Prettier. JDC uses the project's own
 Prettier (node_modules/.bin/prettier in the file's folder or a parent) or
 one installed globally; install it with: npm i -D prettier (needs Node.js).
 Prettier reads its settings from the nearest .prettierrc, prettier.config.*,
@@ -53,7 +53,7 @@ Linting and problems
 In projects with ESLint (an eslint.config.js and ESLint installed with
 npm i -D eslint), the whole project is linted when the workspace opens, C#
 projects are built, and files are linted again when they are opened, saved
-or changed outside JMX.
+or changed outside JDC.
   Ctrl+Shift+M     lint the whole workspace and show the Problems list
   F4 / Shift+F4    go to the next / previous problem
   Ctrl+S, S        also applies ESLint's automatic fixes (after Prettier)
@@ -90,7 +90,7 @@ cursor) shows the failure or problem in a popup. The Tests and Problems
 tabs show an icon and a count, e.g. ✖ Tests (2).
 The list follows your edits as you type: a new test appears at once, and a
 test whose code you change goes back to not run (changing it back brings
-the result back). Changes made outside JMX (git checkout ...) are picked up
+the result back). Changes made outside JDC (git checkout ...) are picked up
 too. Stories run through Vitest when the project uses Storybook's Vitest
 addon; otherwise they are listed only. A mark next to the line numbers shows
 each test's status; the failure message shows in the status bar.
@@ -102,7 +102,7 @@ Directory.Build.props, .editorconfig ...) runs the affected checks again.
 
 Code navigation
 ---------------
-JMX indexes the workspace's JavaScript, TypeScript, Vue and C# files: their
+JDC indexes the workspace's JavaScript, TypeScript, Vue and C# files: their
 functions, classes, methods and properties, with JSDoc (/** ... */) and C#
 /// <summary> docs. Matching is by name (imports are followed), so
 obj.save() may have several candidates.
@@ -111,16 +111,27 @@ obj.save() may have several candidates.
                          (Ctrl+Shift+Space shows them, Esc hides them)
   F12, Ctrl+click        go to the definition (several: pick one)
   Alt+Left               go back to where you jumped from
+  Shift+F12              find all references: every use of the name in the
+                         workspace, listed in the panel (Up/Down show them,
+                         Enter opens one, F4 / Shift+F4 step through them);
+                         comments and strings don't count, and a method only
+                         counts where it is called on something (x.Save()) or
+                         in its own file
 A C# member without docs shows the docs of the interface member it
 implements.
 
 Framework names work too, offline. For C# (Task, [Required],
-items.Where(...), _logger.LogInformation(...)) JMX reads the API docs that
+items.Where(...), _logger.LogInformation(...)) JDC reads the API docs that
 the installed .NET SDK and the project's NuGet packages ship, and the file's
 usings say which namespace is meant. F12 shows the full docs on the Docs
 page in the panel: overloads, members, parameters, exceptions; Enter opens
 a listed API, Backspace goes back. JS built-ins (arr.map, JSON.parse,
-fetch) link to MDN; names imported from packages are not indexed.
+fetch) link to MDN. Names imported from npm packages (ref, computed from
+vue) show the docs in the package's own type definitions in node_modules (or
+its @types package): F12 opens the declaration there, Ctrl+F12 the docs page
+it links. Types in JSDoc comments work too: F12 on User in
+@type {{ReturnType<typeof useFetch<User[]>>}} follows its @typedef to the
+interface, e.g. in a .d.ts file.
   Ctrl+F12, w (Docs page)  open the Microsoft Learn / MDN page in your
                            browser (asks first)
 
@@ -149,16 +160,16 @@ view under the mouse. A file is open in only one view at a time.
 Workspaces
 ----------
 A workspace is a named set of folders plus the whole editor state (tabs,
-cursors, views, unsaved edits), saved as a .jmxws project file. Without one
-JMX works in file mode: open and edit any files.
+cursors, views, unsaved edits), saved as a .jdcws project file. Without one
+JDC works in file mode: open and edit any files.
 
-Starting jmx with no files reopens the workspace that was open last time.
-Close Workspace before quitting to start in file mode next time; jmx FILE
+Starting jdc with no files reopens the workspace that was open last time.
+Close Workspace before quitting to start in file mode next time; jdc FILE
 opens just that file, and --no-restore skips reopening.
 
 Workspace menu (Alt+W):
   New Workspace…        give it a name; your open tabs stay open
-  Open Workspace…       pick a .jmxws file (or: jmx project.jmxws)
+  Open Workspace…       pick a .jdcws file (or: jdc project.jdcws)
   Save Workspace (As…)  write the project file
   Add Folder…           choose a folder; all files under it are available
   Remove Folder…        take a folder out of the workspace
@@ -271,11 +282,11 @@ Status bar
 
 Command line
 ------------
-  jmx [FILE]...      open files (missing files open as new, unsaved files)
-  jmx --help         print the shortcut list
-  jmx --version      print the version
+  jdc [FILE]...      open files (missing files open as new, unsaved files)
+  jdc --help         print the shortcut list
+  jdc --version      print the version
 
-  jmx --headless     run without a window (for development, see below)
+  jdc --headless     run without a window (for development, see below)
 
 
 Logging
@@ -287,11 +298,11 @@ Every launch writes a new log file; the previous run's log is kept as
   This run:    {log_file}
 
 Debug builds log at debug level, release builds at info level. Change it with
-the JMX_LOG environment variable or --log-level:
+the JDC_LOG environment variable or --log-level:
 
-  JMX_LOG=trace                  editor at trace (every key and command)
-  JMX_LOG=trace,wgpu_hal=info    also GPU driver messages at info
-  JMX_LOG=*=info                 all libraries at info
+  JDC_LOG=trace                  editor at trace (every key and command)
+  JDC_LOG=trace,wgpu_hal=info    also GPU driver messages at info
+  JDC_LOG=*=info                 all libraries at info
 
 Release builds never contain debug/trace logging. Crashes are written to the
 log with a backtrace.
@@ -299,7 +310,7 @@ log with a backtrace.
 
 Headless mode (development)
 ---------------------------
-  jmx --headless --script test.jmxs [--size 1100x720] [FILE]...
+  jdc --headless --script test.jdcs [--size 1100x720] [FILE]...
 
 Runs the editor without a window, rendering offscreen, so it never touches the
 desktop. Commands come from the script (or stdin):
@@ -309,7 +320,7 @@ desktop. Commands come from the script (or stdin):
   resize WxH           shot FILE.png      state           sleep MS     quit
 
 `shot` saves a PNG of the current frame, `state` prints the editor state as
-JSON. Headless runs log to jmx-headless.log.
+JSON. Headless runs log to jdc-headless.log.
 ",
         version = env!("CARGO_PKG_VERSION"),
         log_dir =

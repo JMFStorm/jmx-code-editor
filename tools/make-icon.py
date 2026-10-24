@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw the JMX app icon and write assets/icon.png, assets/icon-64.png and assets/icon.ico.
+"""Draw the JDC app icon and write assets/icon.png, assets/icon-64.png and assets/icon.ico.
 
 Run from anywhere: python3 tools/make-icon.py  (needs Pillow and the DejaVu Sans Mono font).
 The generated files are committed, so building the editor does not need Python.
@@ -31,10 +31,10 @@ def draw(size: int) -> Image.Image:
     prompt = ImageFont.truetype(FONT, 330)
     d.text((150, 230), ">", font=prompt, fill=ACCENT)
     d.rectangle((400, 500, 600, 545), fill=ACCENT)
-    # "JMX".
+    # "JDC".
     label = ImageFont.truetype(FONT, 250)
-    w = d.textlength("JMX", font=label)
-    d.text(((s - w) / 2, 600), "JMX", font=label, fill=FG)
+    w = d.textlength("JDC", font=label)
+    d.text(((s - w) / 2, 600), "JDC", font=label, fill=FG)
     return img.resize((size, size), Image.LANCZOS)
 
 

@@ -1,9 +1,9 @@
 //! File logging. Every launch starts a fresh `<name>.log`; the previous run's log is kept
 //! as `<name>.prev.log` and anything older is deleted.
 //!
-//! Levels: debug builds log `jmx=debug`, release builds `jmx=info` (debug/trace calls are
+//! Levels: debug builds log `jdc=debug`, release builds `jdc=info` (debug/trace calls are
 //! compiled out of release builds by the `release_max_level_info` feature of `log`).
-//! Other crates log at `warn`. Override with `JMX_LOG` / `--log-level`: a bare level applies
+//! Other crates log at `warn`. Override with `JDC_LOG` / `--log-level`: a bare level applies
 //! to the editor itself (`trace`), `target=level` to one crate (`wgpu_hal=info`) and
 //! `*=level` to everything else.
 
@@ -24,9 +24,9 @@ pub const DEFAULT_SPEC: &str = if cfg!(debug_assertions) {
 pub struct LogOptions {
     /// Log folder; `None` uses the per-user default.
     pub dir: Option<PathBuf>,
-    /// Base file name, e.g. "jmx" or "jmx-headless".
+    /// Base file name, e.g. "jdc" or "jdc-headless".
     pub name: &'static str,
-    /// Filter spec; `None` uses `JMX_LOG` or the build default.
+    /// Filter spec; `None` uses `JDC_LOG` or the build default.
     pub spec: Option<String>,
 }
 
@@ -57,7 +57,7 @@ impl Filter {
                 }
                 None => {
                     if let Ok(level) = item.parse() {
-                        f.targets.push(("jmx".to_string(), level));
+                        f.targets.push(("jdc".to_string(), level));
                     }
                 }
             }
@@ -116,7 +116,7 @@ impl Log for FileLogger {
                 }
                 // Mirror our own warnings (and anyone's errors) to the console in debug builds;
                 // driver chatter from wgpu stays in the file.
-                let ours = record.target() == "jmx" || record.target().starts_with("jmx::");
+                let ours = record.target() == "jdc" || record.target().starts_with("jdc::");
                 if cfg!(debug_assertions) && (record.level() == Level::Error || important && ours) {
                     eprint!("{line}");
                 }
@@ -149,7 +149,7 @@ pub fn log_path() -> Option<&'static Path> {
 pub fn init(opts: LogOptions) {
     let spec = opts
         .spec
-        .or_else(|| std::env::var("JMX_LOG").ok())
+        .or_else(|| std::env::var("JDC_LOG").ok())
         .unwrap_or_else(|| DEFAULT_SPEC.to_string());
     let filter = Filter::parse(&spec);
 
@@ -189,7 +189,7 @@ pub fn init(opts: LogOptions) {
     }
     write_header(logger, &spec);
     if let Some(w) = warning {
-        eprintln!("jmx: logging to stderr only: {w}");
+        eprintln!("jdc: logging to stderr only: {w}");
     }
     install_panic_hook();
 }
@@ -200,7 +200,7 @@ fn write_header(logger: &FileLogger, spec: &str) {
         let args: Vec<String> = std::env::args().collect();
         let _ = writeln!(
             w,
-            "# jmx {} ({}) started {} on {}/{}\n# args: {}\n# filter: {spec}\n",
+            "# jdc {} ({}) started {} on {}/{}\n# args: {}\n# filter: {spec}\n",
             env!("CARGO_PKG_VERSION"),
             if cfg!(debug_assertions) {
                 "debug build"
@@ -300,18 +300,18 @@ mod tests {
 
     #[test]
     fn filter_parsing() {
-        let f = Filter::parse("*=info,jmx=trace,jmx::render=warn,wgpu_hal=error,bogus=nope");
-        assert_eq!(f.level_for("jmx"), LevelFilter::Trace);
-        assert_eq!(f.level_for("jmx::editor"), LevelFilter::Trace);
-        assert_eq!(f.level_for("jmx::render::gpu"), LevelFilter::Warn);
-        assert_eq!(f.level_for("jmxfoo"), LevelFilter::Info);
+        let f = Filter::parse("*=info,jdc=trace,jdc::render=warn,wgpu_hal=error,bogus=nope");
+        assert_eq!(f.level_for("jdc"), LevelFilter::Trace);
+        assert_eq!(f.level_for("jdc::editor"), LevelFilter::Trace);
+        assert_eq!(f.level_for("jdc::render::gpu"), LevelFilter::Warn);
+        assert_eq!(f.level_for("jdcfoo"), LevelFilter::Info);
         assert_eq!(f.level_for("wgpu_hal::vulkan"), LevelFilter::Error);
         assert_eq!(f.level_for("naga"), LevelFilter::Info);
         assert_eq!(f.max(), LevelFilter::Trace);
         assert_eq!(Filter::parse("").level_for("x"), LevelFilter::Warn);
         // A bare level is the editor's own level; other crates stay at warn.
         let f = Filter::parse("trace");
-        assert_eq!(f.level_for("jmx::editor"), LevelFilter::Trace);
+        assert_eq!(f.level_for("jdc::editor"), LevelFilter::Trace);
         assert_eq!(f.level_for("wgpu_hal::vulkan"), LevelFilter::Warn);
     }
 
@@ -326,16 +326,16 @@ mod tests {
 
     #[test]
     fn rotation_keeps_current_and_previous_only() {
-        let dir = std::env::temp_dir().join(format!("jmx-logs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jdc-logs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         for run in 1..=3 {
-            let path = rotate(&dir, "jmx").unwrap();
+            let path = rotate(&dir, "jdc").unwrap();
             fs::write(&path, format!("run {run}")).unwrap();
         }
-        fs::write(dir.join("jmx.2025-01-01.log"), "stale").unwrap();
-        fs::write(dir.join("jmx-headless.log"), "other pair").unwrap();
+        fs::write(dir.join("jdc.2025-01-01.log"), "stale").unwrap();
+        fs::write(dir.join("jdc-headless.log"), "other pair").unwrap();
         fs::write(dir.join("notes.txt"), "unrelated").unwrap();
-        let path = rotate(&dir, "jmx").unwrap();
+        let path = rotate(&dir, "jdc").unwrap();
         fs::write(&path, "run 4").unwrap();
 
         let mut names: Vec<String> = fs::read_dir(&dir)
@@ -346,13 +346,13 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["jmx-headless.log", "jmx.log", "jmx.prev.log", "notes.txt"]
+            ["jdc-headless.log", "jdc.log", "jdc.prev.log", "notes.txt"]
         );
         assert_eq!(
-            fs::read_to_string(dir.join("jmx.prev.log")).unwrap(),
+            fs::read_to_string(dir.join("jdc.prev.log")).unwrap(),
             "run 3"
         );
-        assert_eq!(fs::read_to_string(dir.join("jmx.log")).unwrap(), "run 4");
+        assert_eq!(fs::read_to_string(dir.join("jdc.log")).unwrap(), "run 4");
         fs::remove_dir_all(&dir).unwrap();
     }
 }

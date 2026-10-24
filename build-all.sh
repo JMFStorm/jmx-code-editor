@@ -15,8 +15,8 @@ VERSION=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml
 
 # target triple | output file name | linker the target needs | how to get the linker
 TARGETS=(
-    "x86_64-unknown-linux-gnu|jmx-$VERSION-linux-x86_64|cc|sudo apt install build-essential"
-    "x86_64-pc-windows-gnu|jmx-$VERSION-windows-x86_64.exe|x86_64-w64-mingw32-gcc|sudo apt install mingw-w64"
+    "x86_64-unknown-linux-gnu|jdc-$VERSION-linux-x86_64|cc|sudo apt install build-essential"
+    "x86_64-pc-windows-gnu|jdc-$VERSION-windows-x86_64.exe|x86_64-w64-mingw32-gcc|sudo apt install mingw-w64"
 )
 
 mkdir -p dist
@@ -49,7 +49,7 @@ for entry in "${TARGETS[@]}"; do
     ext=""
     [[ $name == *.exe ]] && ext=".exe"
     if cargo build --release --target "$triple" "$@"; then
-        cp "target/$triple/release/jmx$ext" "dist/$name"
+        cp "target/$triple/release/jdc$ext" "dist/$name"
         RESULTS+=("OK|$triple|dist/$name ($(du -h "dist/$name" | cut -f1))")
     else
         RESULTS+=("FAILED|$triple|cargo build failed")
@@ -58,7 +58,7 @@ for entry in "${TARGETS[@]}"; do
     echo
 done
 
-echo "==> Summary (jmx $VERSION)"
+echo "==> Summary (jdc $VERSION)"
 for r in "${RESULTS[@]}"; do
     IFS='|' read -r status triple detail <<<"$r"
     printf '  %-7s %-26s %s\n' "$status" "$triple" "$detail"
