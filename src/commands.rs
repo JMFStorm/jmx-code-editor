@@ -100,8 +100,16 @@ pub enum Command {
     PrevProblem,
     /// Show the Tests page in the panel.
     ShowTests,
-    /// Popup with the problem or test failure at the cursor.
+    /// Popup with the problem, test failure or doc of the name at the cursor.
     ShowHover,
+    /// Jump to the declaration of the name at the cursor.
+    GoToDefinition,
+    /// Back to where Go to Definition jumped from.
+    GoBack,
+    /// Parameter hints for the call around the cursor.
+    SignatureHelp,
+    /// The web docs (Microsoft Learn / MDN) of the name at the cursor, after asking.
+    OpenDocsInBrowser,
     /// Run the test or suite at the cursor (or the selected Tests row).
     RunTestAtCursor,
     RunAllTests,
@@ -255,7 +263,11 @@ impl Command {
             NextProblem => "Next problem (error / warning)",
             PrevProblem => "Previous problem",
             ShowTests => "Show the Tests list",
-            ShowHover => "Show the problem / test failure at the cursor",
+            ShowHover => "Show the docs / problem / test failure at the cursor",
+            GoToDefinition => "Go to the definition of the name at the cursor",
+            GoBack => "Go back to where Go to Definition jumped from",
+            SignatureHelp => "Show the parameter hints of the call at the cursor",
+            OpenDocsInBrowser => "Open the web docs of the name at the cursor (asks first)",
             RunTestAtCursor => "Run the test at the cursor",
             RunAllTests => "Run all tests",
             RunFailedTests => "Run failed tests",
@@ -321,7 +333,8 @@ impl Command {
             NextTab | PrevTab | GotoTab(_) => Group::Tabs,
             Find | FindNext | FindPrev | GotoLine | FindInFiles | NextResult | PrevResult
             | ToggleCase | ToggleWholeWord | ToggleRegex | LintWorkspace | ShowProblems
-            | NextProblem | PrevProblem | ShowHover => Group::Search,
+            | NextProblem | PrevProblem | ShowHover | GoToDefinition | GoBack | SignatureHelp
+            | OpenDocsInBrowser => Group::Search,
             ShowTests | RunTestAtCursor | RunAllTests | RunFailedTests | RefreshTests => {
                 Group::Tests
             }

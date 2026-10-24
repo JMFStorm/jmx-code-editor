@@ -20,6 +20,8 @@ pub enum PickerKind {
     RemoveFolder,
     /// Fuzzy search over the workspace file index (fixed list).
     QuickOpen,
+    /// Declarations a name may refer to (fixed list, Go to Definition).
+    Definitions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +72,10 @@ pub struct FilePicker {
     pub note: Option<String>,
     /// Quick Open: the fuzzy query the list was last filtered with.
     filtered_for: Option<String>,
+    /// Definitions: the 1-based line and column of each entry of `all`.
+    places: Vec<(usize, usize)>,
+    /// Definitions: the name looked up.
+    name: String,
 }
 
 impl FilePicker {
@@ -132,7 +138,26 @@ impl FilePicker {
             error: None,
             note: None,
             filtered_for: None,
+            places: Vec::new(),
+            name: String::new(),
         }
+    }
+
+    /// Go to Definition with several candidates: `(label, file, line, col)`, 1-based.
+    pub fn definitions(name: &str, items: Vec<(String, PathBuf, usize, usize)>) -> Self {
+        let mut p = Self::empty(PickerKind::Definitions);
+        p.name = name.to_string();
+        for (label, path, line, col) in items {
+            p.all.push(Entry {
+                name: label,
+                path,
+                is_dir: false,
+                kind: EntryKind::Normal,
+            });
+            p.places.push((line, col));
+        }
+        p.refilter();
+        p
     }
 
     fn browses(&self) -> bool {
@@ -149,6 +174,13 @@ impl FilePicker {
             PickerKind::OpenWorkspace => format!("Open Workspace  {}", self.dir.display()),
             PickerKind::ChooseFolder => format!("Add Folder  {}", self.dir.display()),
             PickerKind::RemoveFolder => "Remove Folder from Workspace".to_string(),
+            PickerKind::Definitions => {
+                format!(
+                    "Go to Definition: {}  ({} found)",
+                    self.name,
+                    self.all.len()
+                )
+            }
             PickerKind::QuickOpen => {
                 let mut t = format!("Quick Open  ({} files)", self.all.len());
                 if let Some((line, col)) = self.line_target() {
@@ -170,6 +202,7 @@ impl FilePicker {
             PickerKind::ChooseFolder => "Enter on the first row adds the folder, Backspace goes up",
             PickerKind::RemoveFolder => "Enter removes the selected folder",
             PickerKind::QuickOpen => "type part of a file name, :N goes to a line, e.g. appvue:42",
+            PickerKind::Definitions => "type to filter, Enter goes to the selected definition",
         }
     }
 
@@ -350,6 +383,15 @@ impl FilePicker {
 
     /// Enter on the selected row.
     pub fn activate(&mut self) -> PickResult {
+        if self.kind == PickerKind::Definitions {
+            return match self.visible.get(self.selected) {
+                Some(&i) => {
+                    let (line, col) = self.places[i];
+                    PickResult::OpenAt(self.all[i].path.clone(), line, Some(col))
+                }
+                None => PickResult::None,
+            };
+        }
         let Some(e) = self.selected_entry().cloned() else {
             // Nothing matches: the file picker creates `dir/filter`.
             return if self.kind == PickerKind::OpenFile && !self.filter.is_empty() {

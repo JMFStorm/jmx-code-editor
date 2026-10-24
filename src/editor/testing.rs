@@ -149,6 +149,7 @@ impl Editor {
             self.lint_workspace(false);
             self.build_workspace();
         }
+        self.start_symbols();
         self.scan_tests(folders);
     }
 
@@ -158,6 +159,7 @@ impl Editor {
             j.cancel();
         }
         self.tests = TestState::default();
+        self.stop_symbols();
         self.refresh_tests_page();
     }
 
@@ -383,6 +385,7 @@ impl Editor {
         let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let open = self.find_doc(|d| d.canonical.as_deref() == Some(path.as_path()));
         let mut changed = false;
+        self.symbols_file_changed(&path, removed);
         if tx::is_cs(&path) || tx::js_test_kind(&path).is_some() {
             if removed {
                 self.tests.tree.remove_file(&path);

@@ -455,7 +455,7 @@ impl Editor {
     }
 
     /// A path relative to the workspace folder that holds it, else the full path.
-    fn display_path(&self, path: &Path) -> String {
+    pub(super) fn display_path(&self, path: &Path) -> String {
         let folders = self
             .workspace
             .as_ref()

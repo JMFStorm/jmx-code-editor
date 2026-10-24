@@ -8,21 +8,23 @@
   "respect_gitignore": true,
   "state": {
     "split": true,
-    "split_ratio": 0.58906686,
+    "split_ratio": 0.6762038,
     "focus": 0,
     "font_size": 15.0,
     "explorer": {
-      "visible": false,
-      "width_cols": 41.0,
+      "visible": true,
+      "width_cols": 37.0,
       "expanded": [
-        "sandbox/vue-dashboard",
-        "sandbox/vue-dashboard/src",
-        "sandbox/vue-dashboard/src/components"
+        "sandbox/dotnet-inventory",
+        "sandbox/dotnet-inventory/src",
+        "sandbox/dotnet-inventory/src/Inventory.Api",
+        "sandbox/dotnet-inventory/src/Inventory.Api/Models",
+        "sandbox/vue-dashboard"
       ]
     },
     "panes": [
       {
-        "active": 4,
+        "active": 3,
         "tabs": [
           {
             "kind": "file",
@@ -36,35 +38,26 @@
           {
             "kind": "file",
             "path": "sandbox/dotnet-inventory/src/Inventory.Api/Services/ProductService.cs",
-            "anchor": 1332,
-            "head": 1332,
-            "top_line": 16,
+            "anchor": 2723,
+            "head": 2723,
+            "top_line": 62,
             "left_col": 0,
             "unsaved": null
           },
           {
             "kind": "file",
-            "path": "sandbox/vue-dashboard/src/App.vue",
-            "anchor": 1852,
-            "head": 1852,
-            "top_line": 19,
+            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Services/IProductService.cs",
+            "anchor": 1434,
+            "head": 1434,
+            "top_line": 12,
             "left_col": 0,
             "unsaved": null
           },
           {
             "kind": "file",
-            "path": "sandbox/vue-dashboard/src/utils/validate.js",
-            "anchor": 368,
-            "head": 368,
-            "top_line": 0,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/vue-dashboard/src/components/UserTable.vue",
-            "anchor": 513,
-            "head": 513,
+            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Models/Product.cs",
+            "anchor": 559,
+            "head": 559,
             "top_line": 0,
             "left_col": 0,
             "unsaved": null
@@ -87,7 +80,7 @@
       }
     ],
     "search": {
-      "query": "Priority",
+      "query": "ProblemDetails",
       "include": "",
       "options": {
         "case_sensitive": false,

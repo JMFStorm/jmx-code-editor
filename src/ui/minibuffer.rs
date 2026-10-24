@@ -44,6 +44,11 @@ pub enum PromptKind {
     SaveWorkspaceAs(Option<PendingAction>),
     /// Remove this folder from the workspace? (y)es / (n)o.
     ConfirmRemoveFolder(PathBuf),
+    /// Open this web page (`title` says what it is) in the browser? (y)es / (n)o.
+    ConfirmOpenUrl {
+        url: String,
+        title: String,
+    },
 }
 
 #[derive(Debug)]
@@ -71,6 +76,7 @@ impl Minibuffer {
                 | PromptKind::ConfirmDiscard(_)
                 | PromptKind::ConfirmSaveWorkspace(_)
                 | PromptKind::ConfirmRemoveFolder(_)
+                | PromptKind::ConfirmOpenUrl { .. }
         )
     }
 
@@ -98,6 +104,9 @@ impl Minibuffer {
             PromptKind::SaveWorkspaceAs(_) => "Save workspace as: ".into(),
             PromptKind::ConfirmRemoveFolder(p) => {
                 format!("Remove {} from the workspace? (y)es / (n)o ", p.display())
+            }
+            PromptKind::ConfirmOpenUrl { title, .. } => {
+                format!("Open {title} in your web browser? (y)es / (n)o ")
             }
         }
     }

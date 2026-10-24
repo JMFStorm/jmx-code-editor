@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::editor::document::Document;
 use crate::editor::search::SearchOptions;
 use crate::editor::selection::Selection;
-use crate::editor::{Editor, PROBLEMS_TITLE, Pane, TESTS_TITLE};
+use crate::editor::{DOCS_TITLE, Editor, PROBLEMS_TITLE, Pane, TESTS_TITLE};
 use crate::help;
 use crate::syntax::Lang;
 use crate::ui::explorer::{DEFAULT_WIDTH_COLS, MAX_WIDTH_COLS, MIN_WIDTH_COLS};
@@ -265,10 +265,15 @@ impl Editor {
             .panes
             .iter()
             .map(|pane| PaneState {
-                active: pane.active,
+                // The Docs page is not kept (it shows a lookup, not a place).
+                active: pane.docs[..pane.active.min(pane.docs.len())]
+                    .iter()
+                    .filter(|d| d.virtual_name.as_deref() != Some(DOCS_TITLE))
+                    .count(),
                 tabs: pane
                     .docs
                     .iter()
+                    .filter(|d| d.virtual_name.as_deref() != Some(DOCS_TITLE))
                     .map(|d| match (&d.virtual_name, &d.path) {
                         (Some(n), _) if n == help::SHORTCUTS_TITLE => TabState::Shortcuts,
                         (Some(n), _) if n == PROBLEMS_TITLE => TabState::Problems,

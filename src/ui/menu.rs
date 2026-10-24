@@ -137,6 +137,11 @@ pub fn menu_entries(menu: MenuId, ed: &Editor) -> Vec<MenuEntry> {
                 MenuEntry::item("Remove Last Occurrence", RemoveLastOccurrence, multi),
                 MenuEntry::item("Select All Occurrences", SelectAllOccurrences, doc),
                 MenuEntry::item("Single Cursor", Cancel, multi),
+                MenuEntry::separator(),
+                MenuEntry::item("Go to Definition", GoToDefinition, doc),
+                MenuEntry::item("Go Back", GoBack, !ed.symbols.back.is_empty()),
+                MenuEntry::item("Parameter Hints", SignatureHelp, doc),
+                MenuEntry::item("Open Docs in Browser…", OpenDocsInBrowser, doc),
             ]
         }
         MenuId::Panel => {

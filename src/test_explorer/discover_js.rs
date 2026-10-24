@@ -6,7 +6,7 @@ use std::path::Path;
 use super::{FileTests, Found, FoundSuite, Framework, hash_text};
 
 #[derive(Debug, Clone, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Ident(String),
     /// A string or template literal's text.
     Str(String),
@@ -14,16 +14,16 @@ enum Tok {
 }
 
 #[derive(Debug, Clone)]
-struct Token {
-    tok: Tok,
+pub(crate) struct Token {
+    pub tok: Tok,
     /// Byte offset of the token start and end in the source.
-    start: usize,
-    end: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// Split JS source into identifiers, string literals and punctuation, skipping comments.
 /// Template literals become one string (their `${}` parts are skipped).
-fn tokenize(src: &str) -> Vec<Token> {
+pub(crate) fn tokenize(src: &str) -> Vec<Token> {
     let b = src.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -117,7 +117,7 @@ fn tokenize(src: &str) -> Vec<Token> {
 }
 
 /// Index of the token closing the bracket opened at `open` (or the last token).
-fn matching(toks: &[Token], open: usize) -> usize {
+pub(crate) fn matching(toks: &[Token], open: usize) -> usize {
     let (o, c) = match toks[open].tok {
         Tok::Punct('(') => ('(', ')'),
         Tok::Punct('{') => ('{', '}'),

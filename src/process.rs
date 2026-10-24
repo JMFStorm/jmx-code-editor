@@ -142,6 +142,42 @@ pub fn run_cancellable(
 
 /// The useful first line of a tool's error output, prefixed with the tool name, e.g.
 /// `Prettier: SyntaxError: Unexpected token (3:5)`.
+/// Open a web page in the default browser, without waiting for it. Only `https://` URLs.
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return Err(format!("not a web address: {url}"));
+    }
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut c = Command::new("explorer.exe");
+        c.arg(url).creation_flags(CREATE_NO_WINDOW);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|mut child| {
+            // Reap it in the background so it doesn't linger as a zombie.
+            std::thread::spawn(move || child.wait());
+        })
+        .map_err(|e| format!("cannot open the browser: {e}"))
+}
+
 pub fn first_error_line(tool: &str, stderr: &str) -> Option<String> {
     stderr
         .lines()

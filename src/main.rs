@@ -16,6 +16,7 @@ mod paths;
 mod process;
 mod render;
 mod session;
+mod symbols;
 mod syntax;
 mod test_explorer;
 mod theme;

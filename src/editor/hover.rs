@@ -1,5 +1,6 @@
-//! Hover popups: the failure of a test (gutter mark) or the problems at a spot (underline,
-//! gutter mark), shown when the mouse rests there or with Ctrl+I at the cursor.
+//! Hover popups: the failure of a test (gutter mark), the problems at a spot (underline,
+//! gutter mark) or the doc of the name there, shown when the mouse rests there or with
+//! Ctrl+I at the cursor.
 
 use super::Editor;
 use crate::lint::Severity;
@@ -13,6 +14,10 @@ pub enum HoverKind {
     Pass,
     Text,
     Dim,
+    /// A declaration's signature.
+    Code,
+    /// The active parameter of parameter hints.
+    Param,
 }
 
 /// Where a popup is anchored.
@@ -32,6 +37,13 @@ pub enum HoverAt {
 pub struct Hover {
     pub at: HoverAt,
     pub lines: Vec<(String, HoverKind)>,
+    /// Shown above the anchor's line (parameter hints, so they don't cover the typing).
+    pub above: bool,
+}
+
+/// Word-wrap popup text to `width` columns.
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
+    super::testing::wrap_text(text, width.max(10))
 }
 
 /// What the mouse rests on: a view's line, and the column (`None`: the gutter).
@@ -166,6 +178,20 @@ impl Editor {
             lines.push((format!("{glyph} {code} ({})", d.source.name()), kind));
             lines.extend(d.message.lines().map(|l| (l.to_string(), HoverKind::Text)));
         }
+        // The doc of the name under the mouse (when no problem is there).
+        if lines.is_empty()
+            && let Some(col) = target.col
+            && col < line_len
+        {
+            let l = target.line.min(doc.rope.len_lines().saturating_sub(1));
+            let pos = doc.rope.line_to_char(l) + col;
+            let c = doc.rope.char(pos);
+            if (c.is_alphanumeric() || c == '_' || c == '$')
+                && let Some(doc_lines) = self.symbol_hover(target.pane, pos)
+            {
+                lines = doc_lines;
+            }
+        }
         // The test whose mark is on this line (gutter), or which the spot is inside.
         let test = self.tests.tree.tests.iter().find(|t| {
             &t.file == path
@@ -257,9 +283,12 @@ impl Editor {
                         col,
                     },
                     lines,
+                    above: false,
                 })
             }
-            None => self.info("Nothing to show here (no problem or test at the cursor)"),
+            None => {
+                self.info("Nothing to show here (no problem, test or known name at the cursor)")
+            }
         }
     }
 }

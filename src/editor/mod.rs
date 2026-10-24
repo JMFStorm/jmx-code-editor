@@ -7,10 +7,13 @@ mod linting;
 mod testing;
 pub use linting::{PROBLEMS_TITLE, is_spinner, spinner};
 pub use testing::{TESTS_TITLE, status_glyph};
+mod docs_page;
 pub mod movement;
 mod multi;
 pub mod search;
 pub mod selection;
+pub mod symbols;
+pub use docs_page::DOCS_TITLE;
 pub mod view;
 
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
@@ -128,6 +131,12 @@ pub struct Editor {
     revealed: Option<PathBuf>,
     /// Popup with a test failure or problems (mouse rest, Ctrl+I).
     pub hover: Option<hover::Hover>,
+    /// Symbol index, parameter hints and Go Back history.
+    pub symbols: symbols::SymbolState,
+    /// Open web pages in the browser (off for headless runs and tests).
+    pub launch_urls: bool,
+    /// The last web page opened (or that would have been).
+    pub opened_url: Option<String>,
     /// Where the last workspace is remembered; `None` in headless runs and tests.
     pub state_file: Option<PathBuf>,
     clipboard: Option<arboard::Clipboard>,
@@ -170,6 +179,9 @@ impl Editor {
             tests: testing::TestState::default(),
             revealed: None,
             hover: None,
+            symbols: symbols::SymbolState::default(),
+            launch_urls: !cfg!(test),
+            opened_url: None,
             clipboard,
             internal_clip: String::new(),
             line_clip: None,
@@ -314,6 +326,12 @@ impl Editor {
             }
             return;
         }
+        if self.on_docs_page() {
+            if let Some(c) = text.chars().next() {
+                self.docs_page_key(c);
+            }
+            return;
+        }
         if self.explorer.focused {
             // Space opens/toggles, letters jump to the next matching entry.
             match text.chars().next() {
@@ -333,20 +351,48 @@ impl Editor {
         if self.multi_cursor() {
             self.multi_insert(text);
             self.track_test_edits();
+            self.symbols.signature = None;
             return;
         }
         self.doc_mut().replace_selection(text, EditKind::Insert);
         self.track_test_edits();
         self.ensure_cursor_visible();
+        self.update_signature(text.contains(['(', ',']));
     }
 
     pub fn execute(&mut self, cmd: Command) {
+        // Esc closes the parameter hints first.
+        if cmd == Command::Cancel && self.symbols.signature.take().is_some() {
+            self.hover = None;
+            return;
+        }
+        self.execute_command(cmd);
+        // Parameter hints follow the cursor (and open on request).
+        if cmd == Command::SignatureHelp {
+            self.update_signature(true);
+            if self.symbols.signature.is_none() {
+                self.info("No known function call at the cursor");
+            }
+        } else {
+            self.update_signature(false);
+        }
+    }
+
+    fn execute_command(&mut self, cmd: Command) {
         log::trace!("command {cmd:?}");
         // Any key closes a popup (Ctrl+I opens one).
         self.hover = None;
         if cmd == Command::ShowHover {
             self.show_hover_at_cursor();
             return;
+        }
+        let overlay = self.find.open || self.picker.is_some() || self.minibuffer.is_some();
+        match cmd {
+            Command::SignatureHelp => return,
+            Command::GoToDefinition if !overlay => return self.go_to_definition(),
+            Command::GoBack if !overlay => return self.go_back(),
+            Command::OpenDocsInBrowser if !overlay => return self.open_docs_in_browser(),
+            _ => {}
         }
         if self.find.open && self.find_command(cmd) {
             return;
@@ -363,6 +409,14 @@ impl Editor {
         use Command::*;
         if !self.has_doc() && needs_doc(cmd) {
             return;
+        }
+        // The Docs page: Enter opens the API on the line, Backspace goes back.
+        if self.on_docs_page() {
+            match cmd {
+                Newline => return self.docs_open_row(),
+                Backspace => return self.docs_go_back(),
+                _ => {}
+            }
         }
         // Enter on a Problems row opens that problem; on the Tests page, the test.
         if cmd == Newline && self.on_problems_page() {
@@ -556,7 +610,7 @@ impl Editor {
             ResetSplit => self.split_ratio = 0.5,
             // Menus belong to the session (UI state); nothing to do here.
             // Handled before the match.
-            ShowHover => {}
+            ShowHover | GoToDefinition | GoBack | SignatureHelp | OpenDocsInBrowser => {}
             FileMenu | WorkspaceMenu | SelectionMenu | PanelMenu => {}
             ClosePanelTab => {
                 let index = self.panes[PANEL].active;
@@ -1968,7 +2022,8 @@ impl Editor {
             PromptKind::ConfirmClose { .. }
             | PromptKind::ConfirmDiscard(_)
             | PromptKind::ConfirmSaveWorkspace(_)
-            | PromptKind::ConfirmRemoveFolder(_) => self.minibuffer = Some(mb),
+            | PromptKind::ConfirmRemoveFolder(_)
+            | PromptKind::ConfirmOpenUrl { .. } => self.minibuffer = Some(mb),
         }
         self.ensure_cursor_visible();
     }
@@ -1992,6 +2047,8 @@ impl Editor {
             (PromptKind::ConfirmSaveWorkspace(action), 'n') => self.check_unsaved_then(action),
             (PromptKind::ConfirmRemoveFolder(path), 'y') => self.remove_folder(&path),
             (PromptKind::ConfirmRemoveFolder(_), 'n') => {}
+            (PromptKind::ConfirmOpenUrl { url, .. }, 'y') => self.open_url(&url),
+            (PromptKind::ConfirmOpenUrl { .. }, 'n') => {}
             (_, 'c') => {}
             _ => self.minibuffer = Some(mb), // ignore other keys
         }

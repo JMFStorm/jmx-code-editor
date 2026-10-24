@@ -499,6 +499,16 @@ impl Session {
         self.editor
             .click(pos, self.modifiers.shift_key(), self.click_count);
         self.dragging = self.click_count == 1;
+        // Ctrl+click: Go to Definition (in the editor view).
+        if self.modifiers.control_key()
+            && self.click_count == 1
+            && pl.pane == crate::editor::EDITOR
+            && pl.text.contains(x, y)
+        {
+            self.dragging = false;
+            self.editor
+                .execute(crate::commands::Command::GoToDefinition);
+        }
     }
 
     pub fn mouse_release(&mut self) {
@@ -667,6 +677,7 @@ impl Session {
         self.editor.hover = Some(Hover {
             at: HoverAt::Point(x, pl_top + (row + 1.0) * line_h),
             lines,
+            above: false,
         });
         self.hover_shown = Some(target);
         true

@@ -217,7 +217,8 @@ pub fn build(
     if let Some(fl) = &layout.find {
         draw_find_panel(&mut b, ed, layout, fl, cursor_on);
     }
-    if let Some(h) = &ed.hover {
+    // A hover popup, else the parameter hints of the call being typed.
+    if let Some(h) = ed.hover.as_ref().or(ed.symbols.signature.as_ref()) {
         draw_hover(&mut b, ed, layout, h);
     }
     if let Some(menu) = ui.menu {
@@ -576,16 +577,15 @@ fn draw_hover(b: &mut Builder, ed: &Editor, l: &Layout, h: &crate::editor::hover
     let max_cols = ((l.width / l.cell_w) as usize)
         .saturating_sub(4)
         .clamp(20, 90);
-    // Wrap.
+    // Wrap at words.
     let mut rows: Vec<(String, HoverKind)> = Vec::new();
     for (text, kind) in &h.lines {
-        let chars: Vec<char> = text.chars().collect();
-        if chars.is_empty() {
+        if text.is_empty() {
             rows.push((String::new(), *kind));
             continue;
         }
-        for chunk in chars.chunks(max_cols) {
-            rows.push((chunk.iter().collect(), *kind));
+        for piece in crate::editor::hover::wrap(text, max_cols) {
+            rows.push((piece, *kind));
         }
     }
     let cols = rows
@@ -597,11 +597,12 @@ fn draw_hover(b: &mut Builder, ed: &Editor, l: &Layout, h: &crate::editor::hover
     let pad = l.cell_w;
     let w = cols as f32 * l.cell_w + 2.0 * pad;
     let h_px = rows.len() as f32 * l.line_h + l.line_h * 0.6;
-    let below = ay + h_px <= l.status.y;
-    let y = if below {
-        ay + 2.0
-    } else {
+    let fits_below = ay + h_px <= l.status.y;
+    let fits_above = line_top - h_px - 2.0 >= l.toolbar.bottom();
+    let y = if h.above && fits_above || !fits_below {
         (line_top - h_px - 2.0).max(l.toolbar.bottom())
+    } else {
+        ay + 2.0
     };
     let x = ax.min(l.width - w - pad).max(pad);
     let panel = Rect::new(x, y, w, h_px);
@@ -614,6 +615,8 @@ fn draw_hover(b: &mut Builder, ed: &Editor, l: &Layout, h: &crate::editor::hover
             HoverKind::Pass => theme.token(Token::Pass),
             HoverKind::Text => theme.fg,
             HoverKind::Dim => theme.fg_dim,
+            HoverKind::Code => theme.token(Token::Function),
+            HoverKind::Param => theme.token(Token::Type),
         };
         b.label(text, x + pad, ty, color, panel);
         ty += l.line_h;
@@ -1190,7 +1193,7 @@ fn draw_tab_bar(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PaneLayout, focus
                     HoverKind::Error => theme.error,
                     HoverKind::Warning => theme.warning,
                     HoverKind::Pass => theme.token(Token::Pass),
-                    HoverKind::Text => theme.accent,
+                    HoverKind::Text | HoverKind::Code | HoverKind::Param => theme.accent,
                     HoverKind::Dim => theme.fg_dim,
                 };
                 (r.start + 2..r.end + 2, c)
@@ -1239,7 +1242,8 @@ pub fn mode_label(ed: &Editor) -> &'static str {
             PromptKind::ConfirmClose { .. }
             | PromptKind::ConfirmDiscard(_)
             | PromptKind::ConfirmSaveWorkspace(_)
-            | PromptKind::ConfirmRemoveFolder(_),
+            | PromptKind::ConfirmRemoveFolder(_)
+            | PromptKind::ConfirmOpenUrl { .. },
         ) => "CONFIRM",
         Some(PromptKind::WorkspaceName | PromptKind::SaveWorkspaceAs(_)) => "WORKSPACE",
     }

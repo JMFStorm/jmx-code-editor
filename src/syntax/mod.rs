@@ -4,6 +4,7 @@
 
 mod csharp;
 mod css;
+mod docs_page;
 mod js;
 mod json;
 mod markup;
@@ -32,6 +33,8 @@ pub enum Lang {
     Problems,
     /// The Tests page.
     Tests,
+    /// The Docs page (.NET API docs).
+    Docs,
 }
 
 impl Lang {
@@ -64,6 +67,7 @@ impl Lang {
             Lang::Css => "CSS",
             Lang::CSharp => "C#",
             Lang::Problems => "Problems",
+            Lang::Docs => "Docs",
             Lang::Tests => "Tests",
         }
     }
@@ -132,6 +136,7 @@ pub fn highlight_line(lang: Lang, state: &State, line: &str) -> (Vec<Span>, Stat
         Lang::CSharp => csharp::lex(&mut lx, &mut st.csharp, chars.len()),
         Lang::Problems => problems::lex(&mut lx),
         Lang::Tests => tests_page::lex(&mut lx),
+        Lang::Docs => docs_page::lex(&mut lx),
         Lang::Xml | Lang::Html | Lang::Vue => markup::lex(&mut lx, &mut st, lang),
     }
     (lx.spans, st)
@@ -341,6 +346,7 @@ mod tests {
             Lang::CSharp,
             Lang::Problems,
             Lang::Tests,
+            Lang::Docs,
         ];
         let chars: Vec<char> = sample.chars().collect();
         for lang in langs {

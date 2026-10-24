@@ -4,22 +4,22 @@
 use super::{FileTests, Found, FoundSuite, Framework, hash_text};
 
 #[derive(Debug, Clone, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Ident(String),
     Str,
     Punct(char),
 }
 
 #[derive(Debug, Clone)]
-struct Token {
-    tok: Tok,
-    start: usize,
-    end: usize,
+pub(crate) struct Token {
+    pub tok: Tok,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// Identifiers and punctuation of C# source; strings, chars, comments and preprocessor lines
 /// are skipped (strings leave a placeholder).
-fn tokenize(src: &str) -> Vec<Token> {
+pub(crate) fn tokenize(src: &str) -> Vec<Token> {
     let b = src.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -324,7 +324,7 @@ pub fn discover(src: &str, framework: Framework) -> FileTests {
     out
 }
 
-fn matching(toks: &[Token], open: usize) -> usize {
+pub(crate) fn matching(toks: &[Token], open: usize) -> usize {
     let (o, c) = match toks.get(open).map(|t| &t.tok) {
         Some(Tok::Punct('(')) => ('(', ')'),
         Some(Tok::Punct('{')) => ('{', '}'),

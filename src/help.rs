@@ -100,6 +100,30 @@ saved; compiler errors and warnings appear in the Problems list. Saving a
 config file (eslint.config.js, package.json, tsconfig.json, .csproj,
 Directory.Build.props, .editorconfig ...) runs the affected checks again.
 
+Code navigation
+---------------
+JMX indexes the workspace's JavaScript, TypeScript, Vue and C# files: their
+functions, classes, methods and properties, with JSDoc (/** ... */) and C#
+/// <summary> docs. Matching is by name (imports are followed), so
+obj.save() may have several candidates.
+  Mouse rest, Ctrl+I     the signature and docs of the name there
+  typing name( or ,      parameter hints: the current parameter highlighted
+                         (Ctrl+Shift+Space shows them, Esc hides them)
+  F12, Ctrl+click        go to the definition (several: pick one)
+  Alt+Left               go back to where you jumped from
+A C# member without docs shows the docs of the interface member it
+implements.
+
+Framework names work too, offline. For C# (Task, [Required],
+items.Where(...), _logger.LogInformation(...)) JMX reads the API docs that
+the installed .NET SDK and the project's NuGet packages ship, and the file's
+usings say which namespace is meant. F12 shows the full docs on the Docs
+page in the panel: overloads, members, parameters, exceptions; Enter opens
+a listed API, Backspace goes back. JS built-ins (arr.map, JSON.parse,
+fetch) link to MDN; names imported from packages are not indexed.
+  Ctrl+F12, w (Docs page)  open the Microsoft Learn / MDN page in your
+                           browser (asks first)
+
 Editing extras
 --------------
   Ctrl+K           delete the line
