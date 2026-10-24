@@ -27,6 +27,13 @@ settings). The tab with the blue line on top is where the cursor is.
   Drag the line    resize the panel (mouse)
   Ctrl+F6          center the line again (or double-click it)
 
+Syntax highlighting
+-------------------
+JavaScript (.js .mjs .cjs .jsx, also .ts), JSON, XML (.xml .svg ...), HTML,
+CSS, C# (.cs) and Vue files (template, script and style parts) are
+colored. The
+language is shown in the status bar.
+
 Editing extras
 --------------
   Ctrl+K           delete the line
@@ -51,9 +58,13 @@ view under the mouse. A file is open in only one view at a time.
 
 Workspaces
 ----------
-JMX starts in file mode: open and edit any files. A workspace is a named set
-of folders plus the whole editor state (tabs, cursors, views, unsaved edits),
-saved as a .jmxws project file.
+A workspace is a named set of folders plus the whole editor state (tabs,
+cursors, views, unsaved edits), saved as a .jmxws project file. Without one
+JMX works in file mode: open and edit any files.
+
+Starting jmx with no files reopens the workspace that was open last time.
+Close Workspace before quitting to start in file mode next time; jmx FILE
+opens just that file, and --no-restore skips reopening.
 
 Workspace menu (Alt+W):
   New Workspace…        give it a name; your open tabs stay open

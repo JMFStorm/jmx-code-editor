@@ -137,20 +137,7 @@ static LOG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Per-user log folder.
 pub fn default_dir() -> Option<PathBuf> {
-    let env = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    if cfg!(windows) {
-        env("LOCALAPPDATA").map(|d| d.join("jmx").join("logs"))
-    } else if cfg!(target_os = "macos") {
-        env("HOME").map(|h| h.join("Library/Logs/jmx"))
-    } else {
-        env("XDG_STATE_HOME")
-            .or_else(|| env("HOME").map(|h| h.join(".local/state")))
-            .map(|d| d.join("jmx").join("logs"))
-    }
+    crate::paths::state_dir().map(|d| d.join("logs"))
 }
 
 /// Path of the current log file, once logging is initialized.

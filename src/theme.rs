@@ -1,5 +1,7 @@
 //! Dark theme. There is intentionally no light mode.
 
+use crate::syntax::Token;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 
@@ -37,6 +39,23 @@ impl Rgba {
 
     pub fn glyphon(self) -> glyphon::Color {
         glyphon::Color::rgba(self.0, self.1, self.2, self.3)
+    }
+}
+
+impl Theme {
+    /// Color of a syntax token (One Dark palette).
+    pub fn token(&self, t: Token) -> Rgba {
+        match t {
+            Token::Comment => hex(0x5c6370),
+            Token::DocTag | Token::Keyword => hex(0xc678dd),
+            Token::String => hex(0x98c379),
+            Token::Number | Token::Literal | Token::Attribute => hex(0xd19a66),
+            Token::Function => hex(0x61afef),
+            Token::Property | Token::Tag => hex(0xe06c75),
+            Token::Type => hex(0xe5c07b),
+            Token::Regex | Token::Escape | Token::Entity => hex(0x56b6c2),
+            Token::Punct => hex(0xabb2bf),
+        }
     }
 }
 

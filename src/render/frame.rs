@@ -9,6 +9,7 @@ use crate::editor::movement::{self as mv, char_width};
 use crate::editor::search::SearchOptions;
 use crate::editor::{Editor, MsgKind, PANEL};
 use crate::keymap;
+use crate::syntax::{Span, Token};
 use crate::theme::{Rgba, Theme};
 use crate::ui::find_panel::{Field, Row};
 use crate::ui::layout::{
@@ -68,28 +69,66 @@ impl Builder<'_> {
     }
 
     fn label(&mut self, text: impl Into<String>, x: f32, y: f32, color: Rgba, clip: Rect) {
+        self.colored_label(text.into(), Vec::new(), x, y, color, clip);
+    }
+
+    /// A label with colored byte ranges; the rest uses `color`.
+    fn colored_label(
+        &mut self,
+        text: String,
+        spans: Vec<(std::ops::Range<usize>, Rgba)>,
+        x: f32,
+        y: f32,
+        color: Rgba,
+        clip: Rect,
+    ) {
         self.layers[self.current].text.push(TextItem {
-            text: text.into(),
+            text,
             x,
             y,
             color,
             clip,
+            spans,
         });
     }
 }
 
 /// Visible part of a line: tabs expanded, columns `[left, left + cols)`.
+#[cfg(test)]
 fn display_slice(line: RopeSlice, left: usize, cols: usize, tab: usize) -> String {
+    display_spans(line, left, cols, tab, &[], |_| Rgba(0, 0, 0, 0)).0
+}
+
+/// Like `display_slice`, also mapping the syntax `spans` (char ranges of the line) to
+/// colored byte ranges of the returned string. Later spans win where they overlap.
+fn display_spans(
+    line: RopeSlice,
+    left: usize,
+    cols: usize,
+    tab: usize,
+    spans: &[Span],
+    color: impl Fn(Token) -> Rgba,
+) -> (String, Vec<(std::ops::Range<usize>, Rgba)>) {
+    // Token of each char of the line (the visible part is short, so this stays cheap).
+    let len = line.len_chars();
+    let mut tokens: Vec<Option<Token>> = vec![None; if spans.is_empty() { 0 } else { len }];
+    for s in spans {
+        for t in tokens.iter_mut().take(s.end.min(len)).skip(s.start) {
+            *t = Some(s.token);
+        }
+    }
     let mut out = String::new();
+    let mut ranges: Vec<(std::ops::Range<usize>, Rgba)> = Vec::new();
     let mut col = 0;
     let right = left + cols;
-    for c in line.chars() {
+    for (i, c) in line.chars().enumerate() {
         if c == '\n' {
             break;
         }
         let w = char_width(c, col, tab);
         let end = col + w;
         if end > left {
+            let from = out.len();
             if col < left || c == '\t' {
                 // Partially scrolled-off wide char, or a tab: pad with spaces.
                 out.extend(std::iter::repeat_n(' ', end - col.max(left)));
@@ -98,13 +137,20 @@ fn display_slice(line: RopeSlice, left: usize, cols: usize, tab: usize) -> Strin
             } else {
                 out.push(c);
             }
+            if let Some(Some(t)) = tokens.get(i) {
+                let rgba = color(*t);
+                match ranges.last_mut() {
+                    Some((r, c)) if r.end == from && *c == rgba => r.end = out.len(),
+                    _ => ranges.push((from..out.len(), rgba)),
+                }
+            }
         }
         col = end;
         if col >= right {
             break;
         }
     }
-    out
+    (out, ranges)
 }
 
 pub fn build(
@@ -870,9 +916,13 @@ fn draw_text_area(
             b.label(num, pl.gutter.x + l.cell_w, y, color, body);
         }
 
-        let visible = display_slice(rope.line(line), left, pl.cols + 2, tab);
+        let spans = doc.syntax.line_spans(rope, line).unwrap_or_default();
+        let (visible, colors) =
+            display_spans(rope.line(line), left, pl.cols + 2, tab, &spans, |t| {
+                theme.token(t)
+            });
         if !visible.trim_end().is_empty() {
-            b.label(visible, pl.text.x, y, theme.fg, pl.text);
+            b.colored_label(visible, colors, pl.text.x, y, theme.fg, pl.text);
         }
 
         if focused && cursor_on && ed.minibuffer.is_none() {
@@ -985,7 +1035,7 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
     b.rect(Rect::new(0.0, r.y, chip_w, r.h), theme.accent);
     b.label(mode, 0.0, y, theme.accent_fg, r);
 
-    // Right side: selection, position, indent, encoding, line ending.
+    // Right side: selection, position, language, indent, encoding, line ending.
     let mut right = String::new();
     if let Some(doc) = doc {
         let head = doc.selection.head;
@@ -998,9 +1048,10 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
             right.push_str(&format!("({} selected)  ", e - s));
         }
         right.push_str(&format!(
-            "Ln {}, Col {}  {}  UTF-8  {} ",
+            "Ln {}, Col {}  {}  {}  UTF-8  {} ",
             line + 1,
             col + 1,
+            doc.syntax.lang.name(),
             doc.indent.label(),
             doc.line_ending.label()
         ));
@@ -1117,6 +1168,24 @@ mod tests {
     fn truncate_keeps_tail() {
         assert_eq!(truncate_left("/a/b/file.rs", 20), "/a/b/file.rs");
         assert_eq!(truncate_left("/a/b/file.rs", 8), "…file.rs");
+    }
+
+    #[test]
+    fn display_spans_map_colors_through_tabs_and_scrolling() {
+        use crate::syntax::{Span, Token};
+        let r = Rope::from_str("\tab日cd\n");
+        let red = Rgba(255, 0, 0, 255);
+        let spans = [Span {
+            start: 2,
+            end: 5,
+            token: Token::String,
+        }]; // "b日c"
+        let (text, ranges) = display_spans(r.line(0), 0, 80, 4, &spans, |_| red);
+        assert_eq!(text, "    ab日cd");
+        assert_eq!(&text[ranges[0].0.clone()], "b日c");
+        let (text, ranges) = display_spans(r.line(0), 7, 80, 4, &spans, |_| red);
+        assert_eq!(text, " cd"); // scrolled into the wide char
+        assert_eq!(&text[ranges[0].0.clone()], " c");
     }
 
     #[test]

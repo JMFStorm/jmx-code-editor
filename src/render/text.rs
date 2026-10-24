@@ -2,6 +2,8 @@
 //! `glyphon::Buffer` and cached; buffers not used in a frame are dropped.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Range;
 
 use anyhow::Result;
 use glyphon::{
@@ -16,8 +18,23 @@ pub struct TextItem {
     pub text: String,
     pub x: f32,
     pub y: f32,
+    /// Color of text not covered by `spans`.
     pub color: Rgba,
     pub clip: Rect,
+    /// Colored byte ranges of `text` (syntax highlighting); empty for one color.
+    pub spans: Vec<(Range<usize>, Rgba)>,
+}
+
+impl TextItem {
+    /// Cache key: the text and its colors.
+    fn key(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.text.hash(&mut h);
+        for (r, c) in &self.spans {
+            (r.start, r.end, c.0, c.1, c.2, c.3).hash(&mut h);
+        }
+        h.finish()
+    }
 }
 
 pub struct TextSystem {
@@ -27,7 +44,7 @@ pub struct TextSystem {
     atlas: TextAtlas,
     /// One renderer per layer (editor, overlay), sharing the atlas and shape cache.
     renderers: Vec<TextRenderer>,
-    cache: HashMap<String, Buffer>,
+    cache: HashMap<u64, Buffer>,
     metrics: Metrics,
     font_px: f32,
     pub cell_w: f32,
@@ -89,7 +106,7 @@ impl TextSystem {
         self.line_h = (font_px * line_height).round();
         self.metrics = Metrics::new(font_px, self.line_h);
         self.cache.clear();
-        let probe = self.shape("M");
+        let probe = self.shape("M", &[]);
         self.cell_w = probe
             .layout_runs()
             .next()
@@ -99,19 +116,32 @@ impl TextSystem {
         log::debug!("font {font_px}px: cell {}x{}", self.cell_w, self.line_h);
     }
 
-    fn shape(&mut self, text: &str) -> Buffer {
+    fn shape(&mut self, text: &str, spans: &[(Range<usize>, Rgba)]) -> Buffer {
         let mut buf = Buffer::new(&mut self.font_system, self.metrics);
         buf.set_wrap(Wrap::None);
         buf.set_size(None, Some(self.line_h));
         if self.cell_w > 1.0 {
             buf.set_monospace_width(Some(self.cell_w));
         }
-        buf.set_text(
-            text,
-            &Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-            None,
-        );
+        let attrs = Attrs::new().family(Family::Monospace);
+        if spans.is_empty() {
+            buf.set_text(text, &attrs, Shaping::Advanced, None);
+        } else {
+            // Uncolored gaps use the default color given at draw time.
+            let mut pieces = Vec::with_capacity(spans.len() * 2 + 1);
+            let mut at = 0;
+            for (r, c) in spans {
+                if r.start > at {
+                    pieces.push((&text[at..r.start], attrs.clone()));
+                }
+                pieces.push((&text[r.clone()], attrs.clone().color(c.glyphon())));
+                at = r.end;
+            }
+            if at < text.len() {
+                pieces.push((&text[at..], attrs.clone()));
+            }
+            buf.set_rich_text(pieces, &attrs, Shaping::Advanced, None);
+        }
         buf.shape_until_scroll(&mut self.font_system, false);
         buf
     }
@@ -127,23 +157,28 @@ impl TextSystem {
         self.viewport.update(queue, Resolution { width, height });
 
         // Move buffers still in use into a fresh map; shape the new ones.
+        let keys: [Vec<u64>; 2] = layers.map(|l| l.iter().map(TextItem::key).collect());
         let mut old = std::mem::take(&mut self.cache);
-        for item in layers.iter().flat_map(|l| l.iter()) {
-            if item.text.is_empty() || self.cache.contains_key(&item.text) {
+        for (item, key) in layers
+            .iter()
+            .flat_map(|l| l.iter())
+            .zip(keys.iter().flatten())
+        {
+            if item.text.is_empty() || self.cache.contains_key(key) {
                 continue;
             }
-            let buf = match old.remove(&item.text) {
+            let buf = match old.remove(key) {
                 Some(b) => b,
-                None => self.shape(&item.text),
+                None => self.shape(&item.text, &item.spans),
             };
-            self.cache.insert(item.text.clone(), buf);
+            self.cache.insert(*key, buf);
         }
         drop(old);
 
-        for (renderer, items) in self.renderers.iter_mut().zip(layers) {
+        for ((renderer, items), keys) in self.renderers.iter_mut().zip(layers).zip(&keys) {
             let cache = &self.cache;
-            let areas = items.iter().filter_map(|item| {
-                let buffer = cache.get(&item.text)?;
+            let areas = items.iter().zip(keys).filter_map(|(item, key)| {
+                let buffer = cache.get(key)?;
                 Some(TextArea {
                     buffer,
                     left: item.x,

@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod app_state;
 mod commands;
 mod config;
 mod editor;
@@ -9,8 +10,10 @@ mod headless;
 mod help;
 mod keymap;
 mod logging;
+mod paths;
 mod render;
 mod session;
+mod syntax;
 mod theme;
 mod ui;
 mod workspace;
@@ -30,6 +33,7 @@ Options:
   --size WxH          headless render size in pixels (default 1100x720)
   --scale F           headless display scale factor (default 1)
   --software          headless: use the CPU fallback renderer
+  --no-restore        do not reopen the last workspace
   --log-dir DIR       folder for log files
   --log-level SPEC    log filter: trace | debug,wgpu_hal=info | *=info (env: JMX_LOG)
   -h, --help          show this help
@@ -49,6 +53,9 @@ struct Args {
     software: bool,
     log_dir: Option<PathBuf>,
     log_level: Option<String>,
+    no_restore: bool,
+    /// State file override (tests); headless runs use none unless given.
+    state_file: Option<PathBuf>,
 }
 
 enum Parsed {
@@ -66,6 +73,8 @@ fn parse_args(raw: impl Iterator<Item = OsString>) -> Result<Parsed> {
         software: false,
         log_dir: None,
         log_level: None,
+        no_restore: false,
+        state_file: None,
     };
     let mut raw = raw.peekable();
     let mut only_files = false;
@@ -106,6 +115,8 @@ fn parse_args(raw: impl Iterator<Item = OsString>) -> Result<Parsed> {
             }
             "--headless" => args.headless = true,
             "--software" => args.software = true,
+            "--no-restore" => args.no_restore = true,
+            "--state-file" => args.state_file = Some(PathBuf::from(value("a file")?)),
             "--script" => args.script = Some(PathBuf::from(value("a file")?)),
             "--size" => {
                 let v = value("WxH")?;
@@ -174,7 +185,17 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<i32> {
-    let editor = editor::Editor::new(config::Config::default(), &args.paths);
+    let mut editor = editor::Editor::new(config::Config::default(), &args.paths);
+    // Remember (and with no files given, reopen) the last workspace. Headless runs leave the
+    // user's state alone unless a state file is given.
+    let state_file = match (&args.state_file, args.headless) {
+        (Some(f), _) => Some(f.clone()),
+        (None, false) => paths::state_file(),
+        (None, true) => None,
+    };
+    if let Some(file) = state_file {
+        editor.attach_state(file, args.paths.is_empty() && !args.no_restore);
+    }
     if args.headless {
         return Ok(headless::run(
             editor,

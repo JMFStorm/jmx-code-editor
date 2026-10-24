@@ -374,3 +374,55 @@ fn multi_cursor_revert_and_editor_view() {
     assert_eq!(fs::read_to_string(&file).unwrap(), "foo bar foo baz foo\n");
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn reopens_the_last_workspace() {
+    let dir = temp_dir("restore");
+    fs::create_dir_all(dir.join("proj")).unwrap();
+    fs::write(dir.join("proj/a.js"), "const a = 1;\n").unwrap();
+    let ws = dir.join("p.jmxws");
+    fs::write(
+        &ws,
+        r#"{"version":1,"name":"p","folders":["proj"],"respect_gitignore":true}"#,
+    )
+    .unwrap();
+    let state = dir.join("state.json");
+    let state_arg = format!("--state-file={}", state.display());
+    let run_with = |script: &str, files: &[&Path]| {
+        let script_path = dir.join("restore.jmxs");
+        fs::write(&script_path, script).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+            .args(["--headless", "--size=640x400", &state_arg])
+            .arg("--log-dir")
+            .arg(dir.join("logs"))
+            .arg("--script")
+            .arg(&script_path)
+            .args(files)
+            .output()
+            .expect("failed to start jmx");
+        if out.status.code() == Some(EXIT_NO_GPU) {
+            return None;
+        }
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(out)
+    };
+    // Opening a workspace remembers it.
+    let Some(_) = run_with("key ctrl+p\ntype a.js\nkey enter\nquit\n", &[&ws]) else {
+        return;
+    };
+    assert!(fs::read_to_string(&state).unwrap().contains("p.jmxws"));
+    // No files given: the workspace comes back, with its tab.
+    let out = run_with("state\nquit\n", &[]).unwrap();
+    let s = states(&out);
+    assert!(s[0].contains("\"name\":\"p\""), "{}", s[0]);
+    assert!(s[0].contains("\"title\":\"a.js\""), "{}", s[0]);
+    assert!(s[0].contains("\"lang\":\"JavaScript\""), "{}", s[0]);
+    // With a file on the command line the workspace is not reopened.
+    let out = run_with("state\nquit\n", &[&dir.join("proj/a.js")]).unwrap();
+    assert!(states(&out)[0].contains("\"workspace\":null"));
+    fs::remove_dir_all(&dir).unwrap();
+}

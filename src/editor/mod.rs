@@ -10,6 +10,7 @@ pub mod view;
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::app_state::AppState;
 use crate::commands::{Command, Motion};
 use crate::config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use crate::help;
@@ -99,6 +100,8 @@ pub struct Editor {
     /// Find in Files panel; kept when closed so the results can be reopened and stepped.
     pub find: FindPanel,
     pub should_quit: bool,
+    /// Where the last workspace is remembered; `None` in headless runs and tests.
+    pub state_file: Option<PathBuf>,
     clipboard: Option<arboard::Clipboard>,
     /// Fallback when the system clipboard is unavailable.
     internal_clip: String,
@@ -127,6 +130,7 @@ impl Editor {
             search_opts: SearchOptions::default(),
             find: FindPanel::default(),
             should_quit: false,
+            state_file: None,
             clipboard,
             internal_clip: String::new(),
             line_clip: None,
@@ -512,6 +516,17 @@ impl Editor {
         }
         if !keep_scroll {
             self.ensure_cursor_visible();
+        }
+    }
+
+    /// Compute highlighting state down to the last visible line of every shown document.
+    pub fn update_syntax(&mut self) {
+        for pane in &mut self.panes {
+            let rows = pane.rows;
+            if let Some(doc) = pane.docs.get_mut(pane.active) {
+                let last = doc.view.top_line + rows + 1;
+                doc.syntax.ensure(&doc.rope, last);
+            }
         }
     }
 
@@ -1427,6 +1442,7 @@ impl Editor {
         let old = ws.file.replace(path.clone());
         match self.write_workspace() {
             Ok(()) => {
+                self.remember_workspace();
                 self.info(format!("Saved workspace to {}", path.display()));
                 if let Some(action) = then {
                     self.continue_pending(action);
@@ -1449,6 +1465,7 @@ impl Editor {
                     .as_ref()
                     .map_or(String::new(), |w| w.name.clone());
                 log::info!("opened workspace {name} from {}", path.display());
+                self.remember_workspace();
                 if missing.is_empty() {
                     self.info(format!("Opened workspace {name}"));
                 } else {
@@ -1468,6 +1485,7 @@ impl Editor {
             log::info!("closed workspace {}", ws.name);
             self.info(format!("Closed workspace {}", ws.name));
         }
+        self.remember_workspace();
         self.explorer = Explorer::default();
         self.find.open = false;
         self.find.clear_results();
@@ -1480,6 +1498,50 @@ impl Editor {
             .push(Document::new_virtual(help::HELP_TITLE, &help::help_text()));
         self.focus = 0;
         self.split = true;
+    }
+
+    /// Use `file` to remember the open workspace. With `restore` (no files on the command
+    /// line), reopen the workspace remembered from the last run.
+    pub fn attach_state(&mut self, file: PathBuf, restore: bool) {
+        self.state_file = Some(file.clone());
+        if self.workspace.is_some() {
+            self.remember_workspace();
+            return;
+        }
+        if !restore {
+            return;
+        }
+        let Some(last) = AppState::load(&file).last_workspace else {
+            return;
+        };
+        if last.is_file() {
+            log::info!("reopening last workspace {}", last.display());
+            self.open_workspace_now(&last);
+        } else {
+            log::warn!("last workspace {} not found", last.display());
+            self.warn(format!("Last workspace not found: {}", last.display()));
+            self.remember_workspace();
+        }
+    }
+
+    /// Record the current workspace file (or none) as the one to reopen next time.
+    fn remember_workspace(&self) {
+        let Some(state_file) = &self.state_file else {
+            return;
+        };
+        let last = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.file.as_ref())
+            .map(|f| std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()));
+        let mut state = AppState::load(state_file);
+        if state.last_workspace == last {
+            return;
+        }
+        state.last_workspace = last;
+        if let Err(e) = state.save(state_file) {
+            log::warn!("cannot save {}: {e:#}", state_file.display());
+        }
     }
 
     fn quick_open(&mut self) {
@@ -1681,7 +1743,7 @@ impl Editor {
                     self.error(format!("{} is a directory", path.display()));
                     return;
                 }
-                let old = self.doc_mut().path.replace(path);
+                let old = self.doc_mut().path.replace(path.clone());
                 self.save(after);
                 if self
                     .message
@@ -1689,6 +1751,12 @@ impl Editor {
                     .is_some_and(|m| m.kind == MsgKind::Error)
                 {
                     self.doc_mut().path = old;
+                } else if self.has_doc() && self.doc().path.as_ref() == Some(&path) {
+                    // A new name may mean a new language.
+                    let lang = crate::syntax::Lang::from_path(&path);
+                    if self.doc().syntax.lang != lang {
+                        self.doc_mut().syntax.set_lang(lang);
+                    }
                 }
             }
             PromptKind::Find { .. } => {

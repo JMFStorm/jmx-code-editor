@@ -124,6 +124,7 @@ impl Session {
     pub fn draw(&mut self, renderer: &mut Renderer, cursor_on: bool) -> bool {
         let started = Instant::now();
         self.relayout(renderer);
+        self.editor.update_syntax();
         let Some(layout) = &self.layout else {
             return false;
         };

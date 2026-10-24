@@ -458,6 +458,44 @@ mod tests {
     }
 
     #[test]
+    fn last_workspace_is_remembered_and_forgotten() {
+        let dir = temp("last");
+        let ws_file = dir.join("w.jmxws");
+        let state = dir.join("state.json");
+        let mut ed = Editor::new(Config::default(), &[]);
+        let mut ws = Workspace::new("w");
+        ws.folders.push(dir.join("proj"));
+        ws.file = Some(ws_file.clone());
+        ed.workspace = Some(ws);
+        ed.write_workspace().unwrap();
+        ed.attach_state(state.clone(), true);
+        let last = || crate::app_state::AppState::load(&state).last_workspace;
+        assert_eq!(last(), Some(fs::canonicalize(&ws_file).unwrap()));
+
+        // A fresh start with no files reopens it.
+        let mut ed2 = Editor::new(Config::default(), &[]);
+        ed2.attach_state(state.clone(), true);
+        assert_eq!(ed2.workspace.as_ref().map(|w| w.name.as_str()), Some("w"));
+        // Closing it means the next start is in file mode.
+        ed2.execute(Command::CloseWorkspace);
+        assert!(ed2.workspace.is_none());
+        assert_eq!(last(), None);
+
+        // A remembered workspace that no longer exists is dropped with a warning.
+        crate::app_state::AppState {
+            last_workspace: Some(dir.join("gone.jmxws")),
+        }
+        .save(&state)
+        .unwrap();
+        let mut ed3 = Editor::new(Config::default(), &[]);
+        ed3.attach_state(state.clone(), true);
+        assert!(ed3.workspace.is_none());
+        assert!(ed3.message.as_ref().unwrap().text.contains("not found"));
+        assert_eq!(last(), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn files_in_the_panel_move_to_the_editor_on_restore() {
         let dir = temp("legacy");
         fs::write(dir.join("proj/a.txt"), "a").unwrap();

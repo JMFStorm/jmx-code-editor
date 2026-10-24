@@ -9,6 +9,7 @@ use super::history::{Change, EditKind, History};
 use super::movement;
 use super::selection::Selection;
 use super::view::View;
+use crate::syntax::{Lang, Syntax};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnding {
@@ -69,6 +70,8 @@ pub struct Document {
     pub read_only: bool,
     /// Tab title for documents that are not backed by a file.
     pub virtual_name: Option<String>,
+    /// Language and highlighting state.
+    pub syntax: Syntax,
 }
 
 impl Document {
@@ -91,6 +94,7 @@ impl Document {
             view: View::default(),
             read_only: false,
             virtual_name: None,
+            syntax: Syntax::new(Lang::Plain),
         }
     }
 
@@ -108,12 +112,15 @@ impl Document {
         let bytes = match fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(Self::new_empty(Some(path.to_path_buf()), tab_width));
+                let mut doc = Self::new_empty(Some(path.to_path_buf()), tab_width);
+                doc.syntax.set_lang(Lang::from_path(path));
+                return Ok(doc);
             }
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
         let mut doc = Self::from_bytes(&bytes, tab_width);
         doc.path = Some(path.to_path_buf());
+        doc.syntax.set_lang(Lang::from_path(path));
         Ok(doc)
     }
 
@@ -240,6 +247,7 @@ impl Document {
         if changes.is_empty() {
             return;
         }
+        self.text_changed(&changes);
         self.history.record(kind, changes, before, after);
         self.selection = after.clamp(self.rope.len_chars());
         self.goal_col = None;
@@ -352,6 +360,7 @@ impl Document {
                 .remove(c.start..c.start + c.inserted.chars().count());
             self.rope.insert(c.start, &c.removed);
         }
+        self.text_changed(&t.changes);
         self.selection = t.before.clamp(self.rope.len_chars());
         self.goal_col = None;
         true
@@ -367,9 +376,18 @@ impl Document {
                 .remove(c.start..c.start + c.removed.chars().count());
             self.rope.insert(c.start, &c.inserted);
         }
+        self.text_changed(&t.changes);
         self.selection = t.after.clamp(self.rope.len_chars());
         self.goal_col = None;
         true
+    }
+
+    /// Highlighting from the first changed line on is out of date.
+    fn text_changed(&mut self, changes: &[Change]) {
+        if let Some(first) = changes.iter().map(|c| c.start).min() {
+            let pos = first.min(self.rope.len_chars());
+            self.syntax.invalidate_from(self.rope.char_to_line(pos));
+        }
     }
 
     /// Move the cursor to `pos`, extending the selection if `extend`.

@@ -428,7 +428,7 @@ pub fn state_json(session: &Session) -> String {
     let (mut path, mut dirty, mut read_only, mut line, mut col) = (None, None, None, None, None);
     let (mut selection, mut line_text, mut lines, mut indent, mut line_ending) =
         (None, None, None, None, None);
-    let mut cursors = None;
+    let (mut cursors, mut lang) = (None, None);
     if let Some(doc) = doc {
         let head = doc.selection.head;
         let l = doc.rope.char_to_line(head);
@@ -443,6 +443,7 @@ pub fn state_json(session: &Session) -> String {
         col = Some((mv::col_of(&doc.rope, head, ed.config.tab_width) + 1).to_string());
         selection = Some(format!("[{s},{e}]"));
         cursors = Some((doc.extra.len() + 1).to_string());
+        lang = Some(json_str(doc.syntax.lang.name()));
         let text: String = doc.rope.line(l).chars().filter(|&c| c != '\n').collect();
         line_text = Some(json_str(&text));
         lines = Some(doc.rope.len_lines().to_string());
@@ -513,7 +514,7 @@ pub fn state_json(session: &Session) -> String {
     format!(
         "{{\"mode\":{},\"focus\":{},\"split\":{},\"split_ratio\":{:.3},\"menu\":{},\
 \"active\":{},\"tabs\":[{}],\"panes\":[{}],\"path\":{},\"dirty\":{},\"read_only\":{},\
-\"line\":{},\"col\":{},\"selection\":{},\"cursors\":{},\"line_text\":{},\"lines\":{},\"indent\":{},\
+\"line\":{},\"col\":{},\"selection\":{},\"cursors\":{},\"lang\":{},\"line_text\":{},\"lines\":{},\"indent\":{},\
 \"line_ending\":{},\"picker\":{},\"prompt\":{},\"message\":{},\"font_size\":{},\
 \"workspace\":{},\"explorer\":{explorer},\"find\":{find}}}",
         json_str(frame::mode_label(ed)),
@@ -531,6 +532,7 @@ pub fn state_json(session: &Session) -> String {
         opt(col),
         opt(selection),
         opt(cursors),
+        opt(lang),
         opt(line_text),
         opt(lines),
         opt(indent),
