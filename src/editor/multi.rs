@@ -133,6 +133,8 @@ impl Editor {
                 | FileMenu
                 | WorkspaceMenu
                 | SelectionMenu
+                | PanelMenu
+                | ClosePanelTab
                 | ToggleExplorer
                 | ToggleCase
                 | ToggleWholeWord

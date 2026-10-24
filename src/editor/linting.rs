@@ -172,7 +172,7 @@ impl Editor {
 
     /// Rebuild the Problems page text after the diagnostics changed, keeping the cursor on the
     /// same problem when it is still listed.
-    pub(super) fn refresh_problems_page(&mut self) {
+    pub(crate) fn refresh_problems_page(&mut self) {
         let Some((p, i)) = self.problems_page() else {
             return;
         };

@@ -35,6 +35,61 @@ pub(crate) fn walker(dir: &Path, respect_gitignore: bool) -> WalkBuilder {
     w
 }
 
+/// Folders whose files are never tests or project sources, even without a .gitignore.
+fn always_skipped(name: &std::ffi::OsStr) -> bool {
+    name == "node_modules" || name == ".git"
+}
+
+/// Walker for finding tests and projects: .gitignore rules always apply (whatever the
+/// Explorer's toggle), and node_modules / .git are always skipped.
+pub(crate) fn source_walker(dir: &Path) -> WalkBuilder {
+    let mut w = walker(dir, true);
+    w.filter_entry(|e| !always_skipped(e.file_name()));
+    w
+}
+
+/// Is `path` ignored by the .gitignore / .ignore files between its workspace folder and
+/// itself (deeper files win, `!` negations re-include), or by the global git excludes?
+/// Paths outside `folders` are never ignored.
+pub fn is_gitignored(path: &Path, folders: &[PathBuf]) -> bool {
+    use ignore::Match;
+    use ignore::gitignore::{Gitignore, GitignoreBuilder};
+    let Some(root) = folders.iter().find(|f| path.starts_with(f)) else {
+        return false;
+    };
+    if path
+        .strip_prefix(root)
+        .is_ok_and(|rel| rel.components().any(|c| always_skipped(c.as_os_str())))
+    {
+        return true;
+    }
+    let is_dir = path.is_dir();
+    // Innermost folder first: the first decisive match wins.
+    for dir in path.ancestors().skip(1).take_while(|a| a.starts_with(root)) {
+        let mut b = GitignoreBuilder::new(dir);
+        let mut any = false;
+        for name in [".gitignore", ".ignore"] {
+            let f = dir.join(name);
+            if f.is_file() {
+                any |= b.add(&f).is_none();
+            }
+        }
+        if !any {
+            continue;
+        }
+        if let Ok(gi) = b.build() {
+            match gi.matched_path_or_any_parents(path, is_dir) {
+                Match::Ignore(_) => return true,
+                Match::Whitelist(_) => return false,
+                Match::None => {}
+            }
+        }
+    }
+    // Global excludes (core.excludesFile) match relative to their own root.
+    let (global, _) = Gitignore::global();
+    path.starts_with(global.path()) && global.matched_path_or_any_parents(path, is_dir).is_ignore()
+}
+
 /// Entries directly inside `dir`: folders first, then files, case-insensitively sorted.
 pub fn list_dir(dir: &Path, respect_gitignore: bool) -> Vec<DirEntry> {
     let mut out: Vec<DirEntry> = walker(dir, respect_gitignore)
@@ -246,5 +301,24 @@ mod tests {
             fuzzy_score("csv", "src/utils/csv.js").unwrap()
                 > fuzzy_score("csv", "docs/c_s_v.md").unwrap()
         );
+    }
+
+    #[test]
+    fn gitignore_checks_for_single_files() {
+        let dir = std::env::temp_dir().join(format!("jmx-gi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("web/gen")).unwrap();
+        std::fs::create_dir_all(dir.join("web/tests")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "gen/\n*.snap\n").unwrap();
+        std::fs::write(dir.join("web/.gitignore"), "!keep.snap\n").unwrap();
+        let folders = vec![dir.clone()];
+        let ig = |p: &str| is_gitignored(&dir.join(p), &folders);
+        assert!(ig("web/gen/a.spec.js")); // `gen/` matches a folder at any depth
+        assert!(!ig("web/tests/a.spec.js"));
+        assert!(ig("web/tests/x.snap"));
+        assert!(!ig("web/tests/keep.snap")); // re-included by the deeper .gitignore
+        assert!(ig("web/node_modules/pkg/a.spec.js")); // always skipped
+        assert!(!is_gitignored(Path::new("/elsewhere/a.js"), &folders));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

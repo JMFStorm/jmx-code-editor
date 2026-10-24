@@ -2,9 +2,10 @@
   "version": 1,
   "name": "js-mock-test",
   "folders": [
-    "."
+    "sandbox/dotnet-inventory",
+    "sandbox/vue-dashboard"
   ],
-  "respect_gitignore": false,
+  "respect_gitignore": true,
   "state": {
     "split": true,
     "split_ratio": 0.5949096,
@@ -12,16 +13,16 @@
     "font_size": 15.0,
     "explorer": {
       "visible": true,
-      "width_cols": 34.0,
+      "width_cols": 41.0,
       "expanded": [
-        ".",
-        "sandbox",
-        "sandbox/vue-dashboard"
+        "sandbox/vue-dashboard",
+        "sandbox/vue-dashboard/tests",
+        "sandbox/vue-dashboard/tests/unit"
       ]
     },
     "panes": [
       {
-        "active": 4,
+        "active": 8,
         "tabs": [
           {
             "kind": "file",
@@ -67,17 +68,59 @@
             "top_line": 0,
             "left_col": 0,
             "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/dotnet-inventory/tests/Inventory.Tests/ProductServiceTests.cs",
+            "anchor": 341,
+            "head": 341,
+            "top_line": 0,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/vue-dashboard/node_modules/comment-parser/tests/e2e/issue-109.spec.js",
+            "anchor": 590,
+            "head": 590,
+            "top_line": 12,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/vue-dashboard/tests/unit/csv.spec.js",
+            "anchor": 0,
+            "head": 0,
+            "top_line": 0,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/vue-dashboard/tests/unit/StatCard.spec.js",
+            "anchor": 1507,
+            "head": 1507,
+            "top_line": 11,
+            "left_col": 0,
+            "unsaved": null
           }
         ]
       },
       {
-        "active": 1,
+        "active": 2,
         "tabs": [
           {
             "kind": "shortcuts"
           },
           {
             "kind": "help"
+          },
+          {
+            "kind": "tests"
+          },
+          {
+            "kind": "problems"
           }
         ]
       }

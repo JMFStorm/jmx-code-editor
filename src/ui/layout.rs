@@ -65,6 +65,8 @@ pub struct PaneLayout {
     pub tab_bar: Rect,
     pub gutter: Rect,
     pub text: Rect,
+    /// Grab zone of the scrollbar along the right edge.
+    pub scrollbar: Rect,
     /// Digits reserved for line numbers.
     pub gutter_digits: usize,
     pub rows: usize,
@@ -257,18 +259,42 @@ impl PaneLayout {
             (area.w - gutter_w - pad).max(0.0),
             body_h,
         );
+        let grab = (cell_w * 1.2).round();
+        let scrollbar = Rect::new(area.right() - grab, body_y, grab, body_h);
         Self {
             pane,
             area,
             tab_bar,
             gutter,
             text,
+            scrollbar,
             gutter_digits,
             rows: ((body_h / line_h).floor() as usize).max(1),
             cols: ((text.w / cell_w).floor() as usize).max(1),
             cell_w,
             line_h,
         }
+    }
+
+    /// The scrollbar thumb for a document of `lines` lines scrolled to `top` (none if it all
+    /// fits). The track is the text area's height; one screenful of blank space is allowed
+    /// below the last line.
+    pub fn scroll_thumb(&self, top: usize, lines: usize) -> Option<Rect> {
+        if lines <= self.rows {
+            return None;
+        }
+        let total = (lines + self.rows.saturating_sub(1)) as f32;
+        let h = (self.rows as f32 / total * self.text.h).max(self.line_h);
+        let y = self.text.y + top as f32 / total * self.text.h;
+        let w = (self.cell_w * 0.6).round();
+        Some(Rect::new(self.area.right() - w, y, w, h))
+    }
+
+    /// The top line that puts the thumb's top edge at `y` (inverse of `scroll_thumb`).
+    pub fn top_for_thumb_y(&self, y: f32, lines: usize) -> usize {
+        let total = (lines + self.rows.saturating_sub(1)) as f32;
+        let frac = ((y - self.text.y) / self.text.h.max(1.0)).max(0.0);
+        ((frac * total).round() as usize).min(lines.saturating_sub(1))
     }
 
     /// Text cell under a pixel position, relative to the text area (may be out of range).
@@ -499,6 +525,7 @@ pub fn toolbar_buttons(layout: &Layout, ed: &Editor) -> Vec<ToolButton> {
         (workspace, Command::WorkspaceMenu),
         ("File".to_string(), Command::FileMenu),
         ("Selection".to_string(), Command::SelectionMenu),
+        ("Panel".to_string(), Command::PanelMenu),
     ] {
         let w = width(&label);
         out.push(ToolButton {
@@ -551,8 +578,9 @@ mod tests {
         assert_eq!(hit(990.0), Some(Command::ShowShortcuts));
         assert_eq!(hit(buttons[2].rect.x + 2.0), Some(Command::SelectionMenu));
         assert_eq!(hit(500.0), None);
-        assert!(buttons[3].label.ends_with("F1"));
-        assert!(buttons[4].label.ends_with("F2"));
+        assert_eq!(hit(buttons[3].rect.x + 2.0), Some(Command::PanelMenu));
+        assert!(buttons[4].label.ends_with("F1"));
+        assert!(buttons[5].label.ends_with("F2"));
 
         let menu = menu_layout(&l, &ed, MenuId::File, buttons[1].rect);
         let first = &menu.rows[0];
@@ -610,5 +638,21 @@ mod tests {
         assert_eq!(l.panes[0].pane, 0);
         assert_eq!(l.panes[0].area.w, 1000.0);
         assert!(l.divider.is_none());
+    }
+
+    #[test]
+    fn scroll_thumb_round_trip() {
+        let ed = Editor::new(Config::default(), &[]);
+        let l = Layout::compute(&ed, 1000.0, 600.0, 10.0, 20.0, 1.0);
+        let pl = &l.panes[0];
+        assert!(pl.scroll_thumb(0, pl.rows).is_none()); // everything fits
+        let lines = 500;
+        for top in [0, 10, 250, 499] {
+            let thumb = pl.scroll_thumb(top, lines).unwrap();
+            assert!(pl.scrollbar.contains(thumb.x + 1.0, thumb.y + 1.0));
+            assert_eq!(pl.top_for_thumb_y(thumb.y, lines), top);
+        }
+        assert_eq!(pl.top_for_thumb_y(-50.0, lines), 0);
+        assert_eq!(pl.top_for_thumb_y(10_000.0, lines), lines - 1);
     }
 }

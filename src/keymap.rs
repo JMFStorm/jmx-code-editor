@@ -124,6 +124,8 @@ const OTHERS: &[Binding] = &[
     bind(false, YES, true, c(','), RemoveLastOccurrence),
     bind(true, YES, false, c('l'), SelectAllOccurrences),
     bind(false, ANY, true, c('s'), SelectionMenu),
+    bind(false, ANY, true, c('p'), PanelMenu),
+    bind(true, YES, false, c('u'), ShowProblems),
     bind(false, ANY, false, n(NK::Escape), Cancel),
     // Editing
     bind(false, ANY, false, n(NK::Enter), Newline),

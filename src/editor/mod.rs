@@ -4,7 +4,8 @@ mod formatting;
 pub mod history;
 mod linting;
 mod testing;
-pub use testing::status_glyph;
+pub use linting::PROBLEMS_TITLE;
+pub use testing::{TESTS_TITLE, status_glyph};
 pub mod movement;
 mod multi;
 pub mod search;
@@ -116,6 +117,8 @@ pub struct Editor {
     preview_doc: Option<PathBuf>,
     /// Test explorer, builds and file watching.
     pub tests: testing::TestState,
+    /// The editor file last revealed in the Explorer.
+    revealed: Option<PathBuf>,
     /// Where the last workspace is remembered; `None` in headless runs and tests.
     pub state_file: Option<PathBuf>,
     clipboard: Option<arboard::Clipboard>,
@@ -153,6 +156,7 @@ impl Editor {
             problem_rows: Vec::new(),
             preview_doc: None,
             tests: testing::TestState::default(),
+            revealed: None,
             clipboard,
             internal_clip: String::new(),
             line_clip: None,
@@ -346,6 +350,14 @@ impl Editor {
         if cmd == Cancel && self.on_tests_page() && self.cancel_tests() {
             return;
         }
+        // Left / Right fold and unfold groups on the Tests page.
+        if self.on_tests_page() {
+            match cmd {
+                Move(Motion::Left, false) => return self.tests_left(),
+                Move(Motion::Right, false) => return self.tests_right(),
+                _ => {}
+            }
+        }
         if modifies_text(cmd) && self.doc().read_only {
             self.warn(format!("{} is read-only", self.doc().title()));
             return;
@@ -507,7 +519,16 @@ impl Editor {
             }
             ResetSplit => self.split_ratio = 0.5,
             // Menus belong to the session (UI state); nothing to do here.
-            FileMenu | WorkspaceMenu | SelectionMenu => {}
+            FileMenu | WorkspaceMenu | SelectionMenu | PanelMenu => {}
+            ClosePanelTab => {
+                let index = self.panes[PANEL].active;
+                if index < self.panes[PANEL].docs.len() {
+                    self.close_doc(PANEL, index);
+                }
+                if self.panes[PANEL].docs.is_empty() && self.focus == PANEL {
+                    self.focus_view(EDITOR);
+                }
+            }
             QuickOpen => self.quick_open(),
             ToggleExplorer => {
                 self.explorer.visible = !self.explorer.visible;
@@ -576,14 +597,29 @@ impl Editor {
         if !keep_scroll {
             self.ensure_cursor_visible();
         }
-        // Moving through the Problems page shows each problem in the editor.
-        if matches!(cmd, Move(..)) && self.on_problems_page() {
+        // Stepping through the Problems / Tests page shows each row in the editor. Paging
+        // (PageUp/Down, Home/End) only moves the list.
+        let step = matches!(cmd, Move(Motion::Up | Motion::Down, false));
+        if step && self.on_problems_page() {
             self.preview_problem();
         }
-        if matches!(cmd, Move(..)) && self.on_tests_page() {
+        if step && self.on_tests_page() {
             self.preview_test();
         }
         self.track_test_edits();
+    }
+
+    /// Reveal the editor view's active file in the Explorer when it changed (tab switch, file
+    /// opened, tab closed). Called before every layout.
+    pub fn follow_active_file(&mut self) {
+        let current = self.panes[EDITOR].doc().and_then(|d| d.canonical.clone());
+        if current == self.revealed {
+            return;
+        }
+        if let Some(path) = &current {
+            self.explorer.reveal(path, self.workspace.as_ref());
+        }
+        self.revealed = current;
     }
 
     /// Compute highlighting state down to the last visible line of every shown document.
@@ -828,11 +864,7 @@ impl Editor {
             }
         }
         if self.on_tests_page() {
-            if count >= 2 {
-                self.open_test();
-            } else {
-                self.preview_test();
-            }
+            self.tests_click(count >= 2);
         }
     }
 
@@ -1685,7 +1717,8 @@ impl Editor {
             // These work without leaving the Explorer.
             ZoomIn | ZoomOut | ZoomReset | ToggleGitignore | AddFolder | RemoveFolder
             | SaveWorkspace | SaveWorkspaceAs | WorkspaceMenu | FileMenu | SelectionMenu
-            | ToggleExplorer | ToggleCase | ToggleWholeWord | ToggleRegex => {
+            | PanelMenu | ClosePanelTab | ToggleExplorer | ToggleCase | ToggleWholeWord
+            | ToggleRegex => {
                 return false;
             }
             // Editing keys have no meaning here.
@@ -2083,6 +2116,8 @@ fn needs_doc(cmd: Command) -> bool {
             | ResetSplit
             | FileMenu
             | SelectionMenu
+            | PanelMenu
+            | ClosePanelTab
             | LintWorkspace
             | ShowProblems
             | NextProblem

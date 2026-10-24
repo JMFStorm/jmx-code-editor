@@ -34,6 +34,8 @@ pub struct Session {
     dragging_divider: bool,
     /// Left button held on the Explorer's right edge.
     dragging_sidebar: bool,
+    /// Dragging a view's scrollbar thumb: (view, grab offset from the thumb's top).
+    dragging_scrollbar: Option<(usize, f32)>,
     last_click: Option<(Instant, (f32, f32))>,
     click_count: u32,
     /// Sub-line remainder of pixel-precise (touchpad) scrolling.
@@ -55,6 +57,7 @@ impl Session {
             dragging: false,
             dragging_divider: false,
             dragging_sidebar: false,
+            dragging_scrollbar: None,
             last_click: None,
             click_count: 0,
             scroll_accum: (0.0, 0.0),
@@ -91,6 +94,7 @@ impl Session {
 
     /// Recompute layout from the target size and font metrics; tell each view its size.
     pub fn relayout(&mut self, renderer: &mut Renderer) {
+        self.editor.follow_active_file();
         let cfg = &self.editor.config;
         renderer
             .text
@@ -446,6 +450,21 @@ impl Session {
         let Some(pl) = layout.pane_at(x, y) else {
             return;
         };
+        // Scrollbar: drag the thumb, or jump to the click. Scrolling does not move focus.
+        if pl.scrollbar.contains(x, y)
+            && let Some(doc) = self.editor.panes[pl.pane].doc()
+            && let Some(thumb) = pl.scroll_thumb(doc.view.top_line, doc.rope.len_lines())
+        {
+            let offset = if y >= thumb.y && y < thumb.bottom() {
+                y - thumb.y
+            } else {
+                thumb.h / 2.0
+            };
+            self.dragging_scrollbar = Some((pl.pane, offset));
+            self.ui.scrollbar_hot = Some(pl.pane);
+            self.drag_scrollbar(y);
+            return;
+        }
         self.editor.explorer.focused = false;
         self.editor.focus_view(pl.pane);
         if pl.tab_bar.contains(x, y) {
@@ -471,6 +490,7 @@ impl Session {
 
     pub fn mouse_release(&mut self) {
         self.dragging = false;
+        self.dragging_scrollbar = None;
         if self.dragging_divider {
             self.dragging_divider = false;
             self.ui.divider_active = self.over_divider();
@@ -535,6 +555,22 @@ impl Session {
         } else {
             self.ui.sidebar_edge_active = self.over_sidebar_edge();
         }
+        if self.dragging_scrollbar.is_some() {
+            self.drag_scrollbar(y);
+            return true;
+        }
+        // Hovering a scrollbar brightens its thumb.
+        self.ui.scrollbar_hot = self.layout.as_ref().and_then(|l| {
+            l.panes
+                .iter()
+                .find(|pl| pl.scrollbar.contains(x, y))
+                .filter(|pl| {
+                    self.editor.panes[pl.pane]
+                        .doc()
+                        .is_some_and(|d| d.rope.len_lines() > pl.rows)
+                })
+                .map(|pl| pl.pane)
+        });
         // A text drag stays in the view where it started (the focused one).
         if self.dragging
             && let Some(pl) = self.layout.as_ref().and_then(|l| l.pane(self.editor.focus))
@@ -547,6 +583,21 @@ impl Session {
         redraw || self.ui != before
     }
 
+    /// Move the dragged scrollbar thumb so its grab point is at `y`.
+    fn drag_scrollbar(&mut self, y: f32) {
+        let Some((pane, offset)) = self.dragging_scrollbar else {
+            return;
+        };
+        let Some(pl) = self.layout.as_ref().and_then(|l| l.pane(pane)) else {
+            return;
+        };
+        let p = &mut self.editor.panes[pane];
+        let i = p.active;
+        if let Some(doc) = p.docs.get_mut(i) {
+            doc.view.top_line = pl.top_for_thumb_y(y - offset, doc.rope.len_lines());
+        }
+    }
+
     /// Mouse left the window. Returns true if the frame needs redrawing.
     pub fn mouse_leave(&mut self) -> bool {
         let before = self.ui;
@@ -556,6 +607,9 @@ impl Session {
         }
         if !self.dragging_sidebar {
             self.ui.sidebar_edge_active = false;
+        }
+        if self.dragging_scrollbar.is_none() {
+            self.ui.scrollbar_hot = None;
         }
         self.ui != before
     }
@@ -591,6 +645,9 @@ impl Session {
             || self.over_sidebar_edge()
         {
             return CursorIcon::ColResize;
+        }
+        if self.ui.scrollbar_hot.is_some() && layout.find.is_none() && layout.picker.is_none() {
+            return CursorIcon::Default;
         }
         if let Some(fl) = &layout.find
             && fl.panel.contains(x, y)

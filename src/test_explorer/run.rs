@@ -57,7 +57,6 @@ pub struct Request {
 pub struct TestJob {
     rx: Receiver<Report>,
     pub request: Request,
-    pub started: Instant,
     cancel: Arc<AtomicBool>,
 }
 
@@ -88,7 +87,6 @@ impl TestJob {
         Self {
             rx,
             request,
-            started: Instant::now(),
             cancel,
         }
     }

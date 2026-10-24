@@ -415,10 +415,13 @@ pub fn state_json(session: &Session) -> String {
     };
     let panes: Vec<String> = (0..ed.panes.len())
         .map(|p| {
+            let doc = ed.panes[p].doc();
             format!(
-                "{{\"tabs\":[{}],\"active\":{}}}",
+                "{{\"tabs\":[{}],\"active\":{},\"top_line\":{},\"cursor_line\":{}}}",
                 tabs_of(p),
-                ed.panes[p].active
+                ed.panes[p].active,
+                doc.map_or(0, |d| d.view.top_line),
+                doc.map_or(0, |d| d.rope.char_to_line(d.selection.head) + 1)
             )
         })
         .collect();

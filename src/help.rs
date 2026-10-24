@@ -178,6 +178,8 @@ The bar at the very top works with plain mouse clicks:
   Workspace (Alt+W) workspaces, folders, Explorer, Quick Open (see above)
   File (Alt+F)     New, Open, Open Path, Save, Save As, Revert, Close, Quit
   Selection (Alt+S) select all / line, add occurrences (multiple cursors)
+  Panel (Alt+P)    pages in the right panel: Help, Shortcuts, Problems
+                   (Ctrl+Shift+U), Tests (Ctrl+Shift+T); show / hide the panel
   Help  F1         show this page
   Shortcuts  F2    show every keyboard shortcut
 

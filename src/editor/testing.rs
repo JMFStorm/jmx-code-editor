@@ -35,6 +35,8 @@ const WATCH_POLL: Duration = Duration::from_millis(500);
 pub enum TestRow {
     Project(PathBuf),
     File(PathBuf),
+    /// A `describe` block or C# class: file and suite path.
+    Suite(PathBuf, Vec<String>),
     Test(String),
 }
 
@@ -43,8 +45,32 @@ impl TestRow {
         match self {
             TestRow::Project(p) => format!("p:{}", p.display()),
             TestRow::File(p) => format!("f:{}", p.display()),
+            TestRow::Suite(p, path) => format!("s:{}::{}", p.display(), path.join("\u{1f}")),
             TestRow::Test(id) => format!("t:{id}"),
         }
+    }
+
+    fn is_group(&self) -> bool {
+        !matches!(self, TestRow::Test(_))
+    }
+}
+
+/// The status shown for a group: failed if any test failed, running if any runs, passed if
+/// all ran and passed, otherwise not run.
+fn summary(tests: &[&tx::TestCase]) -> Status {
+    let st: Vec<Status> = tests.iter().map(|t| t.status()).collect();
+    if st.contains(&Status::Failed) {
+        Status::Failed
+    } else if st.contains(&Status::Running) {
+        Status::Running
+    } else if st.contains(&Status::Passed)
+        && st
+            .iter()
+            .all(|s| matches!(s, Status::Passed | Status::Skipped | Status::NotRunnable))
+    {
+        Status::Passed
+    } else {
+        Status::NotRun
     }
 }
 
@@ -59,7 +85,8 @@ pub enum RunWhat {
 }
 
 /// Files found by the background workspace scan.
-type ScanResult = Vec<(PathBuf, Project, FileTests)>;
+/// Files found by a scan, with the folders that were scanned.
+type ScanResult = (Vec<PathBuf>, Vec<(PathBuf, Project, FileTests)>);
 
 /// State of the test explorer and the build/watch machinery, owned by the editor.
 #[derive(Default)]
@@ -72,7 +99,7 @@ pub struct TestState {
     reparse: HashMap<PathBuf, Instant>,
     /// Text revision of each open document when last looked at.
     seen: HashMap<PathBuf, u64>,
-    scan: Option<Receiver<ScanResult>>,
+    scans: Vec<Receiver<ScanResult>>,
     pub watcher: Option<FsWatcher>,
     next_watch: Option<Instant>,
     pub builds: Vec<BuildJob>,
@@ -80,6 +107,11 @@ pub struct TestState {
     build_wanted: HashMap<PathBuf, Instant>,
     /// ESLint config roots to lint again, when.
     lint_wanted: HashMap<PathBuf, Instant>,
+    /// The last run problem of each project (shown on its row until its next run).
+    pub run_errors: HashMap<PathBuf, String>,
+    /// Results of the projects in the current run, summed up when the last one finishes.
+    batch: Vec<(String, bool)>,
+    batch_started: Option<Instant>,
     /// Test project roots to re-scan, when (runner or framework config changed).
     rescan_wanted: HashMap<PathBuf, Instant>,
 }
@@ -121,16 +153,16 @@ impl Editor {
         if folders.is_empty() {
             return;
         }
-        let gitignore = self.workspace.as_ref().is_none_or(|w| w.respect_gitignore);
         let (tx_, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("jmx-test-scan".into())
             .spawn(move || {
                 let started = Instant::now();
                 let mut projects: HashMap<PathBuf, Option<Project>> = HashMap::new();
-                let mut out: ScanResult = Vec::new();
+                let mut out = Vec::new();
                 for folder in &folders {
-                    for entry in crate::workspace::files::walker(folder, gitignore)
+                    // Gitignored files are never tests, whatever the Explorer shows.
+                    for entry in crate::workspace::files::source_walker(folder)
                         .build()
                         .flatten()
                     {
@@ -158,14 +190,18 @@ impl Editor {
                     }
                 }
                 log::info!("test scan: {} files in {:?}", out.len(), started.elapsed());
-                let _ = tx_.send(out);
+                let _ = tx_.send((folders, out));
             })
             .expect("cannot start test scan");
-        self.tests.scan = Some(rx);
+        self.tests.scans.push(rx);
     }
 
     /// Re-parse one file: from its buffer when open, else from disk.
     fn reparse_tests(&mut self, path: &Path) {
+        if self.ignored_source(path) {
+            self.tests.tree.remove_file(path);
+            return;
+        }
         let text = match self.find_doc(|d| d.canonical.as_deref() == Some(path)) {
             Some((p, i)) => self.panes[p].docs[i].rope.to_string(),
             None => match std::fs::read_to_string(path) {
@@ -185,6 +221,15 @@ impl Editor {
             Some(found) => self.tests.tree.replace_file(path, found),
             None => self.tests.tree.remove_file(path),
         }
+    }
+
+    /// A file that never holds tests: gitignored (or in node_modules) within the workspace.
+    fn ignored_source(&self, path: &Path) -> bool {
+        let folders = self
+            .workspace
+            .as_ref()
+            .map_or(&[][..], |w| w.folders.as_slice());
+        crate::workspace::files::is_gitignored(path, folders)
     }
 
     /// Note text changes in open test files (and C# files) so they are re-parsed shortly.
@@ -214,10 +259,38 @@ impl Editor {
         let now = Instant::now();
         let mut changed = false;
         // Workspace scan results.
-        if let Some(rx) = &self.tests.scan
-            && let Ok(found) = rx.try_recv()
-        {
-            self.tests.scan = None;
+        let mut done: Vec<ScanResult> = Vec::new();
+        self.tests.scans.retain(|rx| match rx.try_recv() {
+            Ok(r) => {
+                done.push(r);
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => false,
+        });
+        for (roots, found) in done {
+            // Tests under the scanned folders that the scan did not find are gone (deleted,
+            // or now gitignored); open documents are re-parsed from their buffers.
+            let found_files: std::collections::HashSet<PathBuf> =
+                found.iter().map(|(p, _, _)| p.clone()).collect();
+            let stale: Vec<PathBuf> = self
+                .tests
+                .tree
+                .tests
+                .iter()
+                .map(|t| t.file.clone())
+                .filter(|f| roots.iter().any(|r| f.starts_with(r)) && !found_files.contains(f))
+                .collect();
+            for f in stale {
+                if self
+                    .find_doc(|d| d.canonical.as_deref() == Some(f.as_path()))
+                    .is_some()
+                {
+                    self.tests.reparse.insert(f, now);
+                } else {
+                    self.tests.tree.remove_file(&f);
+                }
+            }
             for (path, project, ft) in found {
                 if !self
                     .tests
@@ -341,6 +414,11 @@ impl Editor {
             || name.starts_with("vite.config.")
             || name.starts_with("jest.config.");
         let cs_project = name.ends_with(".csproj");
+        let ignore_file = name == ".gitignore" || name == ".ignore";
+        if ignore_file {
+            // What counts as a test (or project) may have changed below this folder.
+            self.tests.rescan_wanted.insert(dir.clone(), due);
+        }
         let cs_config = name == "directory.build.props"
             || name == "directory.build.targets"
             || name == "directory.packages.props"
@@ -534,6 +612,7 @@ impl Editor {
         }
         let mut requests = Vec::new();
         let mut busy: Vec<String> = Vec::new();
+        let mut no_runner: Vec<(PathBuf, String)> = Vec::new();
         for (project, tests) in by_project {
             if self
                 .tests
@@ -542,6 +621,10 @@ impl Editor {
                 .any(|j| j.request.project.root == project.root)
             {
                 busy.push(project.name.clone());
+                continue;
+            }
+            if project.runner.is_none() {
+                no_runner.push((project.root.clone(), project.name.clone()));
                 continue;
             }
             let all_of_project = matches!(what, RunWhat::All);
@@ -589,11 +672,24 @@ impl Editor {
                 ids,
             });
         }
+        if self.tests.jobs.is_empty() {
+            self.tests.batch.clear();
+            self.tests.batch_started = Some(Instant::now());
+        }
+        for (root, name) in no_runner {
+            let e = "no test runner (vitest or jest in package.json)".to_string();
+            self.tests.batch.push((format!("{name}: {e}"), true));
+            self.tests.run_errors.insert(root, e);
+        }
         if !busy.is_empty() {
             self.info(format!("Tests are already running in {}", busy.join(", ")));
         }
         let count: usize = requests.iter().map(|r| r.ids.len()).sum();
+        if requests.is_empty() && !self.tests.batch.is_empty() {
+            self.finish_batch();
+        }
         for req in requests {
+            self.tests.run_errors.remove(&req.project.root);
             for (id, hash) in &req.ids {
                 if let Some(t) = self.tests.tree.tests.iter_mut().find(|t| &t.id == id) {
                     t.running = true;
@@ -667,16 +763,48 @@ impl Editor {
                     t.running = false;
                 }
             }
-            let secs = job.started.elapsed().as_secs_f32();
+            let name = job.request.project.name.clone();
             match report.error {
-                Some(e) => self.error(e),
-                None if failed > 0 => self.error(format!(
-                    "Tests: {failed} failed, {passed} passed ({secs:.1} s)"
-                )),
-                None => self.info(format!("Tests: {passed} passed ({secs:.1} s)")),
+                Some(e) => {
+                    self.tests.batch.push((format!("{name}: {e}"), true));
+                    self.tests.run_errors.insert(root, e);
+                }
+                None if failed > 0 => self
+                    .tests
+                    .batch
+                    .push((format!("{name}: {failed} failed, {passed} passed"), true)),
+                None => self
+                    .tests
+                    .batch
+                    .push((format!("{name}: {passed} passed"), false)),
+            }
+            if self.tests.jobs.is_empty() {
+                self.finish_batch();
             }
         }
         changed
+    }
+
+    /// The whole run is over: one message for all its projects.
+    fn finish_batch(&mut self) {
+        let parts = std::mem::take(&mut self.tests.batch);
+        let secs = self
+            .tests
+            .batch_started
+            .take()
+            .map_or(0.0, |t| t.elapsed().as_secs_f32());
+        let bad = parts.iter().any(|(_, bad)| *bad);
+        let text = parts
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let msg = format!("Tests: {text} ({secs:.1} s)");
+        if bad {
+            self.error(msg);
+        } else {
+            self.info(msg);
+        }
     }
 
     /// Esc on the Tests page: stop running tests.
@@ -696,6 +824,16 @@ impl Editor {
         if self.on_tests_page() {
             match self.tests_cursor_row() {
                 Some(TestRow::Test(id)) => self.run_tests(RunWhat::Tests(vec![id])),
+                Some(TestRow::Suite(f, path)) => {
+                    let full = self
+                        .tests
+                        .tree
+                        .suites
+                        .get(&f)
+                        .and_then(|s| s.iter().find(|s| s.path == path))
+                        .and_then(|s| s.full_name.clone());
+                    self.run_tests(RunWhat::Suite(f, path, full));
+                }
                 Some(TestRow::File(f)) => {
                     self.run_tests(RunWhat::Tests(self.ids_in(|t| t.file == f)))
                 }
@@ -776,7 +914,7 @@ impl Editor {
     pub(super) fn tests_busy(&self) -> bool {
         !self.tests.jobs.is_empty()
             || !self.tests.builds.is_empty()
-            || self.tests.scan.is_some()
+            || !self.tests.scans.is_empty()
             || !self.tests.reparse.is_empty()
             || !self.tests.build_wanted.is_empty()
             || !self.tests.lint_wanted.is_empty()
@@ -788,7 +926,7 @@ impl Editor {
         let now = Instant::now();
         let busy = (!self.tests.jobs.is_empty()
             || !self.tests.builds.is_empty()
-            || self.tests.scan.is_some())
+            || !self.tests.scans.is_empty())
         .then(|| now + TEST_POLL);
         [
             busy,
@@ -836,7 +974,7 @@ impl Editor {
         self.has_doc() && self.doc().virtual_name.as_deref() == Some(TESTS_TITLE)
     }
 
-    pub(super) fn refresh_tests_page(&mut self) {
+    pub(crate) fn refresh_tests_page(&mut self) {
         let Some((p, i)) = self.tests_page() else {
             return;
         };
@@ -867,12 +1005,12 @@ impl Editor {
         if running > 0 {
             head.push_str(&format!(" · {running} running"));
         }
-        if self.tests.scan.is_some() {
+        if !self.tests.scans.is_empty() {
             head.push_str("   (finding tests…)");
         }
         lines.push((head, None));
         lines.push((
-            "F5 run · Shift+F5 all · Ctrl+F5 failed · r run · a all · f failed · Space fold · Enter open"
+            "F5 run · Shift+F5 all · Ctrl+F5 failed · r run · Space/←→ fold · -/+ all · Enter open"
                 .into(),
             None,
         ));
@@ -888,6 +1026,13 @@ impl Editor {
                 None,
             ));
         }
+        let arrow = |row: &TestRow| {
+            if self.tests.collapsed.contains(&row.key()) {
+                '▸'
+            } else {
+                '▾'
+            }
+        };
         for project in &tree.projects {
             let tests: Vec<&tx::TestCase> = tree
                 .tests
@@ -901,22 +1046,28 @@ impl Editor {
                 continue;
             }
             let row = TestRow::Project(project.root.clone());
-            let folded = self.tests.collapsed.contains(&row.key());
             let ok = tests
                 .iter()
                 .filter(|t| t.status() == Status::Passed)
                 .count();
             let runner = project.runner.map_or("no runner", Framework::name);
+            let problem = self
+                .tests
+                .run_errors
+                .get(&project.root)
+                .map(|e| format!("  — {e}"))
+                .unwrap_or_default();
             lines.push((
                 format!(
-                    "{} {}  ({runner})  {ok}/{} passed",
-                    if folded { '▸' } else { '▾' },
+                    "{} {} {}  ({runner})  {ok}/{} passed{problem}",
+                    arrow(&row),
+                    status_glyph(summary(&tests)),
                     project.name,
                     tests.len()
                 ),
-                Some(row),
+                Some(row.clone()),
             ));
-            if folded {
+            if self.tests.collapsed.contains(&row.key()) {
                 continue;
             }
             let mut files: Vec<&PathBuf> = Vec::new();
@@ -926,48 +1077,25 @@ impl Editor {
                 }
             }
             for file in files {
-                let in_file: Vec<&&tx::TestCase> =
-                    tests.iter().filter(|t| &t.file == file).collect();
+                let in_file: Vec<&tx::TestCase> =
+                    tests.iter().filter(|t| &t.file == file).copied().collect();
                 let row = TestRow::File(file.clone());
-                let folded = self.tests.collapsed.contains(&row.key());
                 let rel = file
                     .strip_prefix(&project.root)
                     .unwrap_or(file)
                     .to_string_lossy()
                     .replace('\\', "/");
-                let failed_here = in_file.iter().any(|t| t.status() == Status::Failed);
                 lines.push((
                     format!(
-                        "  {} {rel}  ({}){}",
-                        if folded { '▸' } else { '▾' },
-                        in_file.len(),
-                        if failed_here && folded { "  ✖" } else { "" }
+                        "  {} {} {rel}  ({})",
+                        arrow(&row),
+                        status_glyph(summary(&in_file)),
+                        in_file.len()
                     ),
-                    Some(row),
+                    Some(row.clone()),
                 ));
-                if folded {
-                    continue;
-                }
-                for t in in_file {
-                    let status = t.status();
-                    let glyph = status_glyph(status);
-                    let mut s = format!("      {glyph} {}", t.display_name());
-                    match (status, t.current_result()) {
-                        (Status::Failed, Some(r)) => {
-                            if let Some(m) = &r.message {
-                                s.push_str(&format!("   — {m}"));
-                            }
-                        }
-                        (Status::Passed, Some(r)) => {
-                            if let Some(d) = r.duration {
-                                s.push_str(&format!("   {} ms", d.as_millis()));
-                            }
-                        }
-                        (Status::Running, _) => s.push_str("   running…"),
-                        (Status::NotRunnable, _) => s.push_str("   (not runnable)"),
-                        _ => {}
-                    }
-                    lines.push((s, Some(TestRow::Test(t.id.clone()))));
+                if !self.tests.collapsed.contains(&row.key()) {
+                    self.suite_lines(file, &[], &in_file, 4, &mut lines);
                 }
             }
         }
@@ -977,6 +1105,71 @@ impl Editor {
             .collect::<Vec<_>>()
             .join("\n");
         (text, lines.into_iter().map(|(_, r)| r).collect())
+    }
+
+    /// Rows for the tests of `file` under suite `path`: direct tests and nested suites, in
+    /// source order, indented by `indent`.
+    fn suite_lines(
+        &self,
+        file: &Path,
+        path: &[String],
+        tests: &[&tx::TestCase],
+        indent: usize,
+        lines: &mut Vec<(String, Option<TestRow>)>,
+    ) {
+        let pad = " ".repeat(indent);
+        // Items at this level: a test directly here, or the first test of a child suite.
+        let mut seen_suites: Vec<String> = Vec::new();
+        for t in tests {
+            let suite = &t.found.suite;
+            if suite.as_slice() == path {
+                let status = t.status();
+                let mut s = format!("{pad}  {} {}", status_glyph(status), t.found.name);
+                match (status, t.current_result()) {
+                    (Status::Failed, Some(r)) => {
+                        if let Some(m) = &r.message {
+                            s.push_str(&format!("   — {m}"));
+                        }
+                    }
+                    (Status::Passed, Some(r)) => {
+                        if let Some(d) = r.duration {
+                            s.push_str(&format!("   {} ms", d.as_millis()));
+                        }
+                    }
+                    (Status::Running, _) => s.push_str("   running…"),
+                    (Status::NotRunnable, _) => s.push_str("   (not runnable)"),
+                    _ => {}
+                }
+                lines.push((s, Some(TestRow::Test(t.id.clone()))));
+            } else if suite.len() > path.len() && suite.starts_with(path) {
+                let name = suite[path.len()].clone();
+                if seen_suites.contains(&name) {
+                    continue;
+                }
+                seen_suites.push(name.clone());
+                let mut sub = path.to_vec();
+                sub.push(name.clone());
+                let inside: Vec<&tx::TestCase> = tests
+                    .iter()
+                    .filter(|t| t.found.suite.starts_with(&sub))
+                    .copied()
+                    .collect();
+                let row = TestRow::Suite(file.to_path_buf(), sub.clone());
+                let folded = self.tests.collapsed.contains(&row.key());
+                lines.push((
+                    format!(
+                        "{pad}{} {} {name}  ({})",
+                        if folded { '▸' } else { '▾' },
+                        status_glyph(summary(&inside)),
+                        inside.len()
+                    ),
+                    Some(row),
+                ));
+                if !folded {
+                    self.suite_lines(file, &sub, &inside, indent + 2, lines);
+                }
+            }
+        }
     }
 
     fn tests_cursor_row(&self) -> Option<TestRow> {
@@ -992,6 +1185,21 @@ impl Editor {
                 let t = tree.tests.iter().find(|t| &t.id == id)?;
                 (t.file.clone(), t.found.line)
             }
+            TestRow::Suite(f, path) => {
+                let line = tree
+                    .suites
+                    .get(f)
+                    .and_then(|s| s.iter().find(|s| &s.path == path))
+                    .map(|s| s.line)
+                    .or_else(|| {
+                        tree.tests
+                            .iter()
+                            .filter(|t| &t.file == f && t.found.suite.starts_with(path))
+                            .map(|t| t.found.line)
+                            .min()
+                    })?;
+                (f.clone(), line)
+            }
             TestRow::File(f) => (f.clone(), 0),
             TestRow::Project(_) => return None,
         };
@@ -1005,7 +1213,7 @@ impl Editor {
         }
     }
 
-    /// Enter / double-click on the Tests page.
+    /// Enter / double-click on the Tests page: open a test, suite or file; fold a project.
     pub(super) fn open_test(&mut self) {
         match self.tests_cursor_row() {
             Some(TestRow::Project(_)) => self.toggle_test_fold(),
@@ -1019,36 +1227,144 @@ impl Editor {
         }
     }
 
-    pub(super) fn toggle_test_fold(&mut self) {
-        let Some(row) = self.tests_cursor_row() else {
-            return;
-        };
-        let row = match row {
+    /// A single click on the Tests page: on a group's arrow it folds the group, elsewhere it
+    /// shows the row in the editor.
+    pub(super) fn tests_click(&mut self, double: bool) {
+        let doc = self.doc();
+        let line = doc.rope.char_to_line(doc.selection.head);
+        let col = doc.selection.head - doc.rope.line_to_char(line);
+        let text: String = doc.rope.line(line).chars().collect();
+        let arrow_col = text.chars().position(|c| c == '▾' || c == '▸');
+        let row = self.tests.rows.get(line).cloned().flatten();
+        let on_group = row.as_ref().is_some_and(TestRow::is_group);
+        if on_group && (arrow_col.is_some_and(|a| col <= a + 1) || double) {
+            self.toggle_test_fold();
+        } else if double {
+            self.open_test();
+        } else {
+            self.preview_test();
+        }
+    }
+
+    /// The group a row folds: itself for groups, the innermost suite or file for a test.
+    fn fold_target(&self, row: TestRow) -> Option<TestRow> {
+        match row {
             TestRow::Test(id) => {
-                // Folding from a test folds its file.
-                match self.tests.tree.tests.iter().find(|t| t.id == id) {
-                    Some(t) => TestRow::File(t.file.clone()),
-                    None => return,
-                }
+                let t = self.tests.tree.tests.iter().find(|t| t.id == id)?;
+                Some(if t.found.suite.is_empty() {
+                    TestRow::File(t.file.clone())
+                } else {
+                    TestRow::Suite(t.file.clone(), t.found.suite.clone())
+                })
             }
-            other => other,
+            other => Some(other),
+        }
+    }
+
+    pub(super) fn toggle_test_fold(&mut self) {
+        let Some(row) = self.tests_cursor_row().and_then(|r| self.fold_target(r)) else {
+            return;
         };
         let key = row.key();
         if !self.tests.collapsed.remove(&key) {
             self.tests.collapsed.insert(key);
         }
-        // Keep the cursor on the folded group.
-        if let Some((p, i)) = self.tests_page() {
-            let (text, rows) = self.tests_text();
-            let line = rows
-                .iter()
-                .position(|r| r.as_ref() == Some(&row))
-                .unwrap_or(0);
-            let doc = &mut self.panes[p].docs[i];
-            doc.rope = Rope::from_str(&text);
-            doc.syntax.set_lang(Lang::Tests);
-            doc.selection = Selection::point(doc.rope.line_to_char(line));
-            self.tests.rows = rows;
+        self.rebuild_tests_page_at(&row);
+    }
+
+    /// Regenerate the page and put the cursor on `row`.
+    fn rebuild_tests_page_at(&mut self, row: &TestRow) {
+        let Some((p, i)) = self.tests_page() else {
+            return;
+        };
+        let (text, rows) = self.tests_text();
+        let line = rows
+            .iter()
+            .position(|r| r.as_ref() == Some(row))
+            .unwrap_or(0);
+        let doc = &mut self.panes[p].docs[i];
+        doc.rope = Rope::from_str(&text);
+        doc.syntax.set_lang(Lang::Tests);
+        doc.selection = Selection::point(doc.rope.line_to_char(line));
+        self.tests.rows = rows;
+    }
+
+    /// Left on the Tests page: collapse the group, or go to the parent group.
+    pub(super) fn tests_left(&mut self) {
+        let Some(row) = self.tests_cursor_row() else {
+            return;
+        };
+        if row.is_group() && !self.tests.collapsed.contains(&row.key()) {
+            self.tests.collapsed.insert(row.key());
+            self.rebuild_tests_page_at(&row);
+            return;
+        }
+        // The nearest row above with less indentation is the parent.
+        let doc = self.doc();
+        let line = doc.rope.char_to_line(doc.selection.head);
+        let indent =
+            |l: usize| -> usize { doc.rope.line(l).chars().take_while(|c| *c == ' ').count() };
+        let own = indent(line);
+        if let Some(parent) = (0..line)
+            .rev()
+            .find(|&l| self.tests.rows.get(l).cloned().flatten().is_some() && indent(l) < own)
+        {
+            let pos = doc.rope.line_to_char(parent);
+            self.doc_mut().selection = Selection::point(pos);
+        }
+    }
+
+    /// Right on the Tests page: expand the group, or step to the next row.
+    pub(super) fn tests_right(&mut self) {
+        let Some(row) = self.tests_cursor_row() else {
+            return;
+        };
+        if row.is_group() && self.tests.collapsed.remove(&row.key()) {
+            self.rebuild_tests_page_at(&row);
+            return;
+        }
+        let doc = self.doc();
+        let line = doc.rope.char_to_line(doc.selection.head);
+        if line + 1 < doc.rope.len_lines() {
+            let pos = doc.rope.line_to_char(line + 1);
+            self.doc_mut().selection = Selection::point(pos);
+            self.preview_test();
+        }
+    }
+
+    /// `-`: fold every file and suite (projects stay open); `+`: unfold everything.
+    fn set_all_folded(&mut self, fold: bool) {
+        let keep = self.tests_cursor_row();
+        self.tests.collapsed.clear();
+        if fold {
+            let tree = &self.tests.tree;
+            let mut keys: Vec<String> = Vec::new();
+            for t in &tree.tests {
+                keys.push(TestRow::File(t.file.clone()).key());
+                for n in 1..=t.found.suite.len() {
+                    keys.push(TestRow::Suite(t.file.clone(), t.found.suite[..n].to_vec()).key());
+                }
+            }
+            self.tests.collapsed.extend(keys);
+        }
+        // Stay on the same group (or its file when it got folded away).
+        let target = match keep {
+            Some(TestRow::Test(_) | TestRow::Suite(..)) if fold => match keep.clone() {
+                Some(TestRow::Test(id)) => self
+                    .tests
+                    .tree
+                    .tests
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| TestRow::File(t.file.clone())),
+                Some(TestRow::Suite(f, _)) => Some(TestRow::File(f)),
+                other => other,
+            },
+            other => other,
+        };
+        match target {
+            Some(row) => self.rebuild_tests_page_at(&row),
+            None => self.refresh_tests_page(),
         }
     }
 
@@ -1059,6 +1375,8 @@ impl Editor {
             'a' | 'A' => self.run_tests(RunWhat::All),
             'f' | 'F' => self.run_tests(RunWhat::Failed),
             ' ' => self.toggle_test_fold(),
+            '-' => self.set_all_folded(true),
+            '+' | '=' => self.set_all_folded(false),
             _ => {}
         }
     }
@@ -1240,6 +1558,205 @@ mod tests {
         ed.track_test_edits();
         ed.wait_jobs(Duration::from_secs(10));
         assert_eq!(names(&ed)[1].1, Status::NotRun);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn page_lines(ed: &Editor) -> Vec<String> {
+        let (p, i) = ed.tests_page().unwrap();
+        ed.panes[p].docs[i]
+            .rope
+            .to_string()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    fn cursor_to(ed: &mut Editor, needle: &str) {
+        let line = page_lines(ed)
+            .iter()
+            .position(|l| l.contains(needle))
+            .unwrap();
+        let doc = ed.doc_mut();
+        doc.selection = Selection::point(doc.rope.line_to_char(line));
+    }
+
+    #[test]
+    fn suites_nest_and_fold() {
+        let (mut ed, dir, spec) = project("fold");
+        fs::write(
+            &spec,
+            "describe('outer', () => {\n  it('a', () => {});\n  describe('inner', () => {\n    it('b', () => {});\n  });\n});\nit('top', () => {});\n",
+        )
+        .unwrap();
+        ed.reparse_tests(&spec);
+        ed.execute(Command::ShowTests);
+        let lines = page_lines(&ed);
+        let body: Vec<&str> = lines[3..].iter().map(|l| l.as_str()).collect();
+        assert_eq!(
+            body,
+            [
+                "▾ ○ jmx-tx-fold-".to_string()
+                    + &std::process::id().to_string()
+                    + "  (Vitest)  0/3 passed",
+                "  ▾ ○ tests/a.spec.js  (3)".into(),
+                "    ▾ ○ outer  (2)".into(),
+                "        ○ a".into(),
+                "      ▾ ○ inner  (1)".into(),
+                "          ○ b".into(),
+                "      ○ top".into(),
+            ]
+        );
+        // A failure inside shows on the folded suite.
+        let b = ed
+            .tests
+            .tree
+            .tests
+            .iter_mut()
+            .find(|t| t.found.name == "b")
+            .unwrap();
+        b.result = Some(RunResult {
+            status: Status::Failed,
+            duration: None,
+            message: Some("nope".into()),
+            hash: b.found.hash,
+        });
+        cursor_to(&mut ed, "▾ ○ outer");
+        ed.insert_text(" "); // Space folds
+        let lines = page_lines(&ed);
+        assert!(
+            lines.contains(&"    ▸ ✖ outer  (2)".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.ends_with(" b") || l.contains("inner"))
+        );
+        // Right unfolds; Left on a test jumps to its suite, Left again folds it.
+        ed.execute(Command::Move(crate::commands::Motion::Right, false));
+        cursor_to(&mut ed, "✖ b");
+        ed.execute(Command::Move(crate::commands::Motion::Left, false));
+        assert_eq!(
+            ed.tests_cursor_row(),
+            Some(TestRow::Suite(
+                spec.clone(),
+                vec!["outer".into(), "inner".into()]
+            ))
+        );
+        ed.execute(Command::Move(crate::commands::Motion::Left, false));
+        assert!(page_lines(&ed).iter().any(|l| l.contains("▸ ✖ inner")));
+        // - folds every file, + unfolds all.
+        ed.insert_text("-");
+        assert_eq!(page_lines(&ed).len(), 5);
+        ed.insert_text("+");
+        assert_eq!(page_lines(&ed).len(), 10);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn page_keys_do_not_move_the_editor() {
+        let (mut ed, dir, spec) = project("page");
+        ed.open_path(&spec);
+        let before = ed.panes[EDITOR].doc().unwrap().selection;
+        ed.execute(Command::ShowTests);
+        ed.execute(Command::Move(crate::commands::Motion::PageDown, false));
+        ed.execute(Command::Move(crate::commands::Motion::DocEnd, false));
+        assert_eq!(ed.panes[EDITOR].doc().unwrap().selection, before);
+        // Up/Down still show the selected test.
+        ed.execute(Command::Move(crate::commands::Motion::Up, false));
+        ed.execute(Command::Move(crate::commands::Motion::Down, false));
+        let doc = ed.panes[EDITOR].doc().unwrap();
+        assert_eq!(doc.rope.char_to_line(doc.selection.head), 3); // it('one')
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn explorer_reveals_the_active_file() {
+        let (mut ed, dir, spec) = project("reveal");
+        let other = dir.join("package.json");
+        ed.open_path(&spec);
+        ed.follow_active_file();
+        let names: Vec<String> = ed.explorer.rows.iter().map(|r| r.name.clone()).collect();
+        assert!(names.contains(&"a.spec.js".to_string()), "{names:?}");
+        assert_eq!(ed.explorer.selected_row().unwrap().path, spec);
+        ed.open_path(&other);
+        ed.follow_active_file();
+        // The tests folder collapsed again; package.json is selected.
+        assert!(!ed.explorer.rows.iter().any(|r| r.name == "a.spec.js"));
+        assert_eq!(ed.explorer.selected_row().unwrap().path, other);
+        ed.execute(Command::PrevTab);
+        ed.follow_active_file();
+        assert_eq!(ed.explorer.selected_row().unwrap().path, spec);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gitignored_files_are_never_tests() {
+        let dir = std::env::temp_dir().join(format!("jmx-tx-ignored-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for d in ["tests", "generated", "node_modules/pkg/test"] {
+            fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let dir = fs::canonicalize(dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"devDependencies":{"vitest":"^2"}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join(".gitignore"), "generated/\n").unwrap();
+        fs::write(
+            dir.join("node_modules/pkg/package.json"),
+            r#"{"devDependencies":{"jest":"1"}}"#,
+        )
+        .unwrap();
+        for f in [
+            "tests/a.spec.js",
+            "generated/g.spec.js",
+            "node_modules/pkg/test/p.spec.js",
+        ] {
+            fs::write(dir.join(f), SPEC).unwrap();
+        }
+        let mut ed = Editor::new(Config::default(), &[]);
+        let mut ws = Workspace::new("ign");
+        ws.folders.push(dir.clone());
+        ws.respect_gitignore = false; // the Explorer shows everything; tests still skip
+        ed.workspace = Some(ws);
+        ed.start_test_explorer();
+        ed.wait_jobs(Duration::from_secs(10));
+        let files = |ed: &Editor| -> Vec<PathBuf> {
+            let mut f: Vec<PathBuf> = ed.tests.tree.tests.iter().map(|t| t.file.clone()).collect();
+            f.dedup();
+            f
+        };
+        assert_eq!(files(&ed), [dir.join("tests/a.spec.js")]);
+        assert_eq!(ed.tests.tree.projects.len(), 1);
+        // Opening an ignored spec by hand adds nothing.
+        ed.open_path(&dir.join("generated/g.spec.js"));
+        ed.track_test_edits();
+        ed.wait_jobs(Duration::from_secs(5));
+        assert_eq!(files(&ed), [dir.join("tests/a.spec.js")]);
+        // Ignoring tests/ in .gitignore (saved): its tests go away.
+        fs::write(dir.join(".gitignore"), "generated/\ntests/\n").unwrap();
+        ed.config_changed(&dir.join(".gitignore"));
+        ed.wait_jobs(Duration::from_secs(10));
+        assert!(files(&ed).is_empty(), "{:?}", files(&ed));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn run_problems_show_on_the_project_row() {
+        let (mut ed, dir, _) = project("noprun");
+        // No vitest/jest anywhere: the project has no runner.
+        fs::write(dir.join("package.json"), "{}").unwrap();
+        ed.tests.tree.projects[0].runner = None;
+        ed.run_tests(RunWhat::All);
+        assert!(ed.message.as_ref().unwrap().text.contains("no test runner"));
+        ed.execute(Command::ShowTests);
+        let lines = page_lines(&ed);
+        assert!(
+            lines[3].contains("(no runner)  0/1 passed  — no test runner"),
+            "{lines:?}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

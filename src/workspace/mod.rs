@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::editor::document::Document;
 use crate::editor::search::SearchOptions;
 use crate::editor::selection::Selection;
-use crate::editor::{Editor, Pane};
+use crate::editor::{Editor, PROBLEMS_TITLE, Pane, TESTS_TITLE};
 use crate::help;
+use crate::syntax::Lang;
 use crate::ui::explorer::{DEFAULT_WIDTH_COLS, MAX_WIDTH_COLS, MIN_WIDTH_COLS};
 
 pub const EXTENSION: &str = "jmxws";
@@ -160,6 +161,8 @@ pub enum TabState {
     },
     Help,
     Shortcuts,
+    Problems,
+    Tests,
 }
 
 /// Store `path` relative to `base` when it lies under it (with `/` separators).
@@ -265,6 +268,8 @@ impl Editor {
                     .iter()
                     .map(|d| match (&d.virtual_name, &d.path) {
                         (Some(n), _) if n == help::SHORTCUTS_TITLE => TabState::Shortcuts,
+                        (Some(n), _) if n == PROBLEMS_TITLE => TabState::Problems,
+                        (Some(n), _) if n == TESTS_TITLE => TabState::Tests,
                         (Some(_), _) => TabState::Help,
                         (None, Some(p)) => TabState::File {
                             path: to_stored(p, base),
@@ -332,6 +337,17 @@ impl Editor {
                         help::SHORTCUTS_TITLE,
                         &help::shortcuts_text(),
                     )),
+                    // Filled in by the refresh below and as results arrive.
+                    TabState::Problems => {
+                        let mut d = Document::new_virtual(PROBLEMS_TITLE, "");
+                        d.syntax.set_lang(Lang::Problems);
+                        Some(d)
+                    }
+                    TabState::Tests => {
+                        let mut d = Document::new_virtual(TESTS_TITLE, "");
+                        d.syntax.set_lang(Lang::Tests);
+                        Some(d)
+                    }
                     TabState::Untitled { cursor, unsaved } => {
                         let mut d = Document::new_empty(None, tab);
                         if let Some(text) = unsaved {
@@ -380,8 +396,26 @@ impl Editor {
             editor.docs.extend(files);
             panel.active = 0;
         }
-        panel.docs = pages;
-        panel.active = panel.active.min(panel.docs.len().saturating_sub(1));
+        // One tab per page (older files could hold several Help tabs).
+        let active_name = pages.get(panel.active).and_then(|d| d.virtual_name.clone());
+        let mut seen = std::collections::HashSet::new();
+        panel.docs = pages
+            .into_iter()
+            .filter(|d| {
+                d.virtual_name
+                    .as_ref()
+                    .is_none_or(|n| seen.insert(n.clone()))
+            })
+            .collect();
+        panel.active = active_name
+            .and_then(|n| {
+                panel
+                    .docs
+                    .iter()
+                    .position(|d| d.virtual_name.as_ref() == Some(&n))
+            })
+            .unwrap_or(panel.active)
+            .min(panel.docs.len().saturating_sub(1));
         self.panes = panes;
         self.split = state.split;
         self.set_split_ratio(state.split_ratio);
@@ -405,6 +439,8 @@ impl Editor {
         self.find.query = state.search.query.clone();
         self.find.include = state.search.include.clone();
         self.search_opts = state.search.options;
+        self.refresh_problems_page();
+        self.refresh_tests_page();
         missing
     }
 
@@ -492,6 +528,59 @@ mod tests {
         assert!(ed3.workspace.is_none());
         assert!(ed3.message.as_ref().unwrap().text.contains("not found"));
         assert_eq!(last(), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn panel_pages_survive_a_restart() {
+        let dir = temp("pages");
+        let mut ed = Editor::new(Config::default(), &[]);
+        ed.execute(Command::ShowProblems);
+        ed.execute(Command::ShowTests);
+        let state = ed.snapshot(&dir);
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(
+            json.contains("\"kind\":\"problems\"") && json.contains("\"kind\":\"tests\""),
+            "{json}"
+        );
+        let mut ed2 = Editor::new(Config::default(), &[]);
+        ed2.restore(&state, &dir);
+        let pages: Vec<(String, crate::syntax::Lang)> = ed2.panes[1]
+            .docs
+            .iter()
+            .map(|d| (d.title(), d.syntax.lang))
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                (help::HELP_TITLE.to_string(), crate::syntax::Lang::Plain),
+                ("Problems".to_string(), crate::syntax::Lang::Problems),
+                ("Tests".to_string(), crate::syntax::Lang::Tests),
+            ]
+        );
+        assert!(
+            ed2.panes[1].docs[1]
+                .rope
+                .to_string()
+                .starts_with("Problems: 0 errors")
+        );
+        assert!(
+            ed2.panes[1].docs[2]
+                .rope
+                .to_string()
+                .starts_with("Tests: 0 passed")
+        );
+        assert_eq!(ed2.panes[1].active, 2);
+
+        // Duplicate pages from older files collapse to one each.
+        let dup: SessionState = serde_json::from_str(
+            r#"{"panes": [{"tabs": []}, {"active": 2, "tabs": [{"kind": "help"}, {"kind": "help"}, {"kind": "tests"}, {"kind": "help"}]}]}"#,
+        )
+        .unwrap();
+        ed2.restore(&dup, &dir);
+        let titles: Vec<String> = ed2.panes[1].docs.iter().map(|d| d.title()).collect();
+        assert_eq!(titles, [help::HELP_TITLE.to_string(), "Tests".to_string()]);
+        assert_eq!(ed2.panes[1].active, 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 

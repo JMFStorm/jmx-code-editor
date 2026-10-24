@@ -220,6 +220,28 @@ impl Explorer {
         }
     }
 
+    /// Show `file` in the tree: expand exactly the folders leading to it (everything else
+    /// collapses) and select it. Returns false if it is not under a workspace folder.
+    pub fn reveal(&mut self, file: &Path, ws: Option<&Workspace>) -> bool {
+        let Some(root) = ws.and_then(|w| w.folders.iter().find(|f| file.starts_with(f))) else {
+            return false;
+        };
+        self.expanded = file
+            .ancestors()
+            .skip(1)
+            .take_while(|a| a.starts_with(root))
+            .map(Path::to_path_buf)
+            .collect();
+        self.rebuild(ws);
+        if let Some(i) = self.rows.iter().position(|r| r.path == file) {
+            self.select(i);
+            // Show some context above the file when it is near the top edge.
+            self.scroll = self.scroll.min(i.saturating_sub(2));
+            self.ensure_visible();
+        }
+        true
+    }
+
     /// Forget expansion state below a removed folder.
     pub fn forget(&mut self, root: &Path) {
         self.expanded.retain(|p| !p.starts_with(root));
@@ -261,6 +283,30 @@ mod tests {
         assert_eq!(ex.selected_row().unwrap().name, "src");
         ex.collapse_or_parent(Some(&ws)); // collapse src
         assert_eq!(names(&ex), [root.as_str(), "src", "README.md"]);
+
+        // Reveal: only the path to the file stays expanded, and it is selected.
+        ex.expanded.insert(dir.join("src"));
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        ex.expanded.insert(dir.join("lib"));
+        assert!(ex.reveal(&dir.join("src/utils/csv.js"), Some(&ws)));
+        assert_eq!(
+            names(&ex),
+            [
+                root.as_str(),
+                "lib",
+                "src",
+                "utils",
+                "csv.js",
+                "App.vue",
+                "README.md"
+            ]
+        );
+        assert_eq!(ex.selected_row().unwrap().name, "csv.js");
+        assert!(!ex.reveal(Path::new("/elsewhere/x.js"), Some(&ws)));
+        ex.set_expanded(1, false, Some(&ws)); // lib is collapsed anyway
+        ex.expanded.remove(&dir.join("src/utils"));
+        ex.expanded.remove(&dir.join("src"));
+        ex.rebuild(Some(&ws));
 
         ex.jump_to_letter('r');
         assert_eq!(ex.selected_row().unwrap().name, "README.md");

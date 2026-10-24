@@ -253,7 +253,7 @@ impl Editor {
             | QuickOpen | ToggleExplorer | FocusExplorer | NewWorkspace | OpenWorkspace
             | SaveWorkspace | SaveWorkspaceAs | AddFolder | RemoveFolder | ToggleGitignore
             | CloseWorkspace | Find | GotoLine | FileMenu | WorkspaceMenu | SelectionMenu
-            | LintWorkspace | ShowProblems => {
+            | PanelMenu | ClosePanelTab | LintWorkspace | ShowProblems => {
                 f.open = false;
                 return false;
             }

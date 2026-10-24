@@ -130,13 +130,6 @@ impl TestCase {
     pub fn current_result(&self) -> Option<&RunResult> {
         self.result.as_ref().filter(|r| r.hash == self.found.hash)
     }
-
-    /// `Suite › Sub › name`.
-    pub fn display_name(&self) -> String {
-        let mut parts = self.found.suite.clone();
-        parts.push(self.found.name.clone());
-        parts.join(" › ")
-    }
 }
 
 /// A test project: a JS package (package.json folder) or a C# test project (csproj folder).

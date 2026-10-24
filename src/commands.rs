@@ -126,6 +126,10 @@ pub enum Command {
     FileMenu,
     /// Open the Selection menu (handled by the session).
     SelectionMenu,
+    /// Open the Panel menu (handled by the session).
+    PanelMenu,
+    /// Close the page shown in the panel.
+    ClosePanelTab,
     /// Multi-cursor: select the word, or add the next occurrence of the selection.
     AddNextOccurrence,
     /// Multi-cursor: drop the most recently added selection.
@@ -267,6 +271,8 @@ impl Command {
             ResetSplit => "Center the divider between views",
             FileMenu => "Open the File menu",
             SelectionMenu => "Open the Selection menu",
+            PanelMenu => "Open the Panel menu (Help, Shortcuts, Problems, Tests)",
+            ClosePanelTab => "Close the page shown in the panel",
             AddNextOccurrence => "Add next occurrence (multi-cursor)",
             RemoveLastOccurrence => "Remove last added occurrence",
             SelectAllOccurrences => "Select all occurrences (multi-cursor)",
@@ -304,7 +310,8 @@ impl Command {
             Copy | Cut | Paste | Undo | Redo => Group::Clipboard,
             NewFile | OpenFile | OpenPath | Save | SaveAs | RevertFile | FormatDocument
             | FormatAndSave | CloseFile | Quit | FileMenu => Group::File,
-            FocusOtherView | FocusLeft | FocusRight | ToggleSplit | ResetSplit => Group::Views,
+            FocusOtherView | FocusLeft | FocusRight | ToggleSplit | ResetSplit | PanelMenu
+            | ClosePanelTab => Group::Views,
             WorkspaceMenu | QuickOpen | ToggleExplorer | FocusExplorer | NewWorkspace
             | OpenWorkspace | SaveWorkspace | SaveWorkspaceAs | AddFolder | RemoveFolder
             | ToggleGitignore | CloseWorkspace => Group::Workspace,

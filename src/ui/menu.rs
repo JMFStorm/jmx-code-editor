@@ -12,11 +12,17 @@ pub enum MenuId {
     Workspace,
     File,
     Selection,
+    Panel,
 }
 
 impl MenuId {
     /// Menus in menu bar order.
-    pub const ALL: [MenuId; 3] = [MenuId::Workspace, MenuId::File, MenuId::Selection];
+    pub const ALL: [MenuId; 4] = [
+        MenuId::Workspace,
+        MenuId::File,
+        MenuId::Selection,
+        MenuId::Panel,
+    ];
 
     /// The menu a toolbar command opens, if any.
     pub fn for_command(cmd: Command) -> Option<MenuId> {
@@ -24,6 +30,7 @@ impl MenuId {
             Command::WorkspaceMenu => Some(MenuId::Workspace),
             Command::FileMenu => Some(MenuId::File),
             Command::SelectionMenu => Some(MenuId::Selection),
+            Command::PanelMenu => Some(MenuId::Panel),
             _ => None,
         }
     }
@@ -96,8 +103,6 @@ pub fn menu_entries(menu: MenuId, ed: &Editor) -> Vec<MenuEntry> {
                 MenuEntry::item("Quick Open…", QuickOpen, has_folders),
                 MenuEntry::item("Find in Files…", FindInFiles, true),
                 MenuEntry::item("Lint Workspace (ESLint)", LintWorkspace, true),
-                MenuEntry::item("Problems", ShowProblems, true),
-                MenuEntry::item("Tests", ShowTests, true),
                 MenuEntry::item("Run All Tests", RunAllTests, true),
                 MenuEntry::item("Refresh Tests", RefreshTests, open),
                 MenuEntry::separator(),
@@ -132,6 +137,29 @@ pub fn menu_entries(menu: MenuId, ed: &Editor) -> Vec<MenuEntry> {
                 MenuEntry::item("Remove Last Occurrence", RemoveLastOccurrence, multi),
                 MenuEntry::item("Select All Occurrences", SelectAllOccurrences, doc),
                 MenuEntry::item("Single Cursor", Cancel, multi),
+            ]
+        }
+        MenuId::Panel => {
+            // The page shown in the panel gets the check mark.
+            let shown = ed
+                .split
+                .then(|| ed.panes[1].doc().and_then(|d| d.virtual_name.clone()))
+                .flatten();
+            let page = |label: &str, title: &str, cmd: Command| {
+                MenuEntry::toggle(label, cmd, true, shown.as_deref() == Some(title))
+            };
+            vec![
+                page("Help", crate::help::HELP_TITLE, Help),
+                page("Shortcuts", crate::help::SHORTCUTS_TITLE, ShowShortcuts),
+                page("Problems", crate::editor::PROBLEMS_TITLE, ShowProblems),
+                page("Tests", crate::editor::TESTS_TITLE, ShowTests),
+                MenuEntry::separator(),
+                MenuEntry::toggle("Show Panel", ToggleSplit, true, ed.split),
+                MenuEntry::item(
+                    "Close Panel Tab",
+                    ClosePanelTab,
+                    !ed.panes[1].docs.is_empty(),
+                ),
             ]
         }
     }
@@ -231,8 +259,8 @@ mod tests {
         assert_eq!(
             enabled(&ed),
             [
-                true, true, false, false, false, false, false, true, false, true, true, true, true,
-                true, false, false
+                true, true, false, false, false, false, false, true, false, true, true, true,
+                false, false
             ]
         );
         let mut ws = Workspace::new("w");
@@ -248,10 +276,31 @@ mod tests {
         assert_eq!(next_item(&entries, None, 1), Some(0));
         assert_eq!(next_item(&entries, Some(1), 1), Some(8)); // jumps to Show Explorer
         assert_eq!(next_item(&entries, Some(8), 1), Some(10)); // Find in Files
-        assert_eq!(next_item(&entries, Some(14), 1), Some(0)); // wraps past disabled items
-        assert_eq!(next_item(&entries, Some(0), -1), Some(14));
+        assert_eq!(next_item(&entries, Some(12), 1), Some(0)); // wraps past disabled items
+        assert_eq!(next_item(&entries, Some(0), -1), Some(12));
         let file = menu_entries(MenuId::File, &ed);
         assert_eq!(next_item(&file, Some(6), 1), Some(8)); // skips Revert: untitled tab
         assert_eq!(next_item(&file, Some(8), 1), Some(10)); // skips the separator
+    }
+
+    #[test]
+    fn panel_menu_checks_the_shown_page() {
+        let mut ed = Editor::new(Config::default(), &[]);
+        let checked = |ed: &Editor| -> Vec<String> {
+            menu_entries(MenuId::Panel, ed)
+                .into_iter()
+                .filter(|e| e.checked == Some(true))
+                .map(|e| e.label)
+                .collect()
+        };
+        assert_eq!(checked(&ed), ["Help", "Show Panel"]);
+        ed.execute(Command::ShowTests);
+        assert_eq!(checked(&ed), ["Tests", "Show Panel"]);
+        ed.execute(Command::ShowProblems);
+        assert_eq!(ed.panes[1].doc().unwrap().title(), "Problems");
+        ed.execute(Command::ClosePanelTab);
+        assert_eq!(ed.panes[1].doc().unwrap().title(), "Tests");
+        ed.execute(Command::ToggleSplit);
+        assert_eq!(checked(&ed), Vec::<String>::new());
     }
 }

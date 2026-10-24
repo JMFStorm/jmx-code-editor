@@ -736,3 +736,129 @@ fn tests_view_runs_syncs_and_builds() {
     );
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The pane objects of a `state` line, in order.
+fn pane_field(state: &str, pane: usize, field: &str) -> usize {
+    let panes = &state[state.find("\"panes\":[").unwrap()..];
+    let key = format!("\"{field}\":");
+    let mut rest = panes;
+    for _ in 0..=pane {
+        let k = rest.find(&key).unwrap();
+        rest = &rest[k + key.len()..];
+    }
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn panel_scrollbar_folding_and_paging() {
+    let dir = temp_dir("panelscroll");
+    let dir = fs::canonicalize(&dir).unwrap();
+    fs::create_dir_all(dir.join("tests")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"devDependencies":{"vitest":"^2"}}"#,
+    )
+    .unwrap();
+    // Enough tests to need scrolling in the panel.
+    let mut spec = String::new();
+    for s in 0..6 {
+        spec.push_str(&format!("describe('suite{s}', () => {{\n"));
+        for t in 0..8 {
+            spec.push_str(&format!("  it('test {s}.{t}', () => {{}});\n"));
+        }
+        spec.push_str("});\n");
+    }
+    let file = dir.join("tests/a.spec.js");
+    fs::write(&file, &spec).unwrap();
+    let ws = dir.join("w.jmxws");
+    fs::write(
+        &ws,
+        r#"{"version":1,"name":"w","folders":["."],"respect_gitignore":true}"#,
+    )
+    .unwrap();
+    // 640x400: the panel is the right half; its scrollbar is at the right edge.
+    let script = "wait\n\
+                  key ctrl+shift+t\n\
+                  state\n\
+                  press 637,100\n\
+                  move 637,300\n\
+                  release 637,300\n\
+                  state\n\
+                  key ctrl+home\n\
+                  key pgdn\n\
+                  state\n\
+                  key ctrl+home\n\
+                  key down\nkey down\nkey down\nkey down\nkey down\n\
+                  key space\n\
+                  state\n\
+                  quit\n";
+    let Some(out) = run(&dir, script, &[&ws, &file]) else {
+        return;
+    };
+    let s = states(&out);
+    assert_eq!(pane_field(&s[0], 1, "top_line"), 0, "{}", s[0]);
+    // Dragging the panel's scrollbar scrolls the panel only.
+    assert!(pane_field(&s[1], 1, "top_line") > 5, "{}", s[1]);
+    assert_eq!(pane_field(&s[1], 0, "top_line"), 0, "{}", s[1]);
+    assert!(s[1].contains("\"focus\":1"), "{}", s[1]);
+    // PageDown in the list leaves the editor where it was.
+    assert_eq!(
+        pane_field(&s[2], 0, "cursor_line"),
+        pane_field(&s[0], 0, "cursor_line"),
+        "{}",
+        s[2]
+    );
+    assert!(pane_field(&s[2], 1, "cursor_line") > 5, "{}", s[2]);
+    // Space on the first suite row folds it: 8 fewer lines.
+    let lines = |st: &str| -> usize {
+        let k = st.find("\"lines\":").unwrap() + 8;
+        st[k..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(lines(&s[3]), lines(&s[0]) - 8, "{}\n{}", s[0], s[3]);
+    assert!(s[3].contains("▸ ○ suite0  (8)"), "{}", s[3]);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn panel_pages_survive_restart_and_panel_menu() {
+    let dir = temp_dir("panelpages");
+    fs::write(dir.join("a.txt"), "hello\n").unwrap();
+    let ws = dir.join("w.jmxws");
+    fs::write(
+        &ws,
+        r#"{"version":1,"name":"w","folders":["."],"respect_gitignore":true}"#,
+    )
+    .unwrap();
+    // First run: open Problems and Tests in the panel; quitting saves the workspace.
+    let Some(_) = run(&dir, "key ctrl+shift+u\nkey ctrl+shift+t\nquit\n", &[&ws]) else {
+        return;
+    };
+    // Second run: the same pages come back (not Help), and the Panel menu switches pages.
+    let out = run(
+        &dir,
+        "state\nkey alt+p\nkey down\nkey down\nkey enter\nstate\nquit\n",
+        &[&ws],
+    )
+    .unwrap();
+    let s = states(&out);
+    let panel = |st: &str| st[st.find("\"panes\":[").unwrap()..].to_string();
+    assert!(panel(&s[0]).contains("{\"title\":\"Problems\""), "{}", s[0]);
+    assert!(panel(&s[0]).contains("{\"title\":\"Tests\""), "{}", s[0]);
+    assert!(
+        s[0].contains("\"lang\":\"Tests\"") || s[0].contains("\"focus\":0"),
+        "{}",
+        s[0]
+    );
+    // Alt+P, Down, Down (Help is highlighted first): Problems.
+    assert!(s[1].contains("\"lang\":\"Problems\""), "{}", s[1]);
+    fs::remove_dir_all(&dir).unwrap();
+}

@@ -44,6 +44,8 @@ pub struct UiState {
     pub divider_active: bool,
     /// Mouse is over (or dragging) the Explorer's right edge.
     pub sidebar_edge_active: bool,
+    /// View whose scrollbar the mouse is over or dragging.
+    pub scrollbar_hot: Option<usize>,
 }
 
 struct Builder<'a> {
@@ -184,7 +186,8 @@ pub fn build(
     for pl in &layout.panes {
         // The Explorer can hold the keyboard focus instead of a view.
         let focused = pl.pane == ed.focus && !ed.explorer.focused;
-        draw_text_area(&mut b, ed, layout, pl, focused, cursor_on);
+        let hot = ui.scrollbar_hot == Some(pl.pane);
+        draw_text_area(&mut b, ed, layout, pl, focused, cursor_on, hot);
         draw_tab_bar(&mut b, ed, layout, pl, focused);
     }
     if let Some(line) = layout.divider_line {
@@ -832,6 +835,7 @@ fn draw_text_area(
     pl: &PaneLayout,
     focused: bool,
     cursor_on: bool,
+    scrollbar_hot: bool,
 ) {
     let theme = b.theme;
     let Some(doc) = ed.panes[pl.pane].doc() else {
@@ -1010,13 +1014,14 @@ fn draw_text_area(
         }
     }
 
-    // Scrollbar.
-    let total = rope.len_lines() + pl.rows.saturating_sub(1);
-    if rope.len_lines() > pl.rows {
-        let w = (l.cell_w * 0.6).round();
-        let h = (pl.rows as f32 / total as f32 * pl.text.h).max(l.line_h);
-        let y = pl.text.y + top as f32 / total as f32 * pl.text.h;
-        b.rect(Rect::new(pl.area.right() - w, y, w, h), theme.scrollbar);
+    // Scrollbar: brighter while hovered or dragged.
+    if let Some(thumb) = pl.scroll_thumb(top, rope.len_lines()) {
+        let color = if scrollbar_hot {
+            theme.scrollbar_active
+        } else {
+            theme.scrollbar
+        };
+        b.rect(thumb, color);
     }
 }
 
