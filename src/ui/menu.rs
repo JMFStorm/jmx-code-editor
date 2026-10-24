@@ -95,6 +95,11 @@ pub fn menu_entries(menu: MenuId, ed: &Editor) -> Vec<MenuEntry> {
                 MenuEntry::toggle("Show Explorer", ToggleExplorer, true, ed.explorer.visible),
                 MenuEntry::item("Quick Open…", QuickOpen, has_folders),
                 MenuEntry::item("Find in Files…", FindInFiles, true),
+                MenuEntry::item("Lint Workspace (ESLint)", LintWorkspace, true),
+                MenuEntry::item("Problems", ShowProblems, true),
+                MenuEntry::item("Tests", ShowTests, true),
+                MenuEntry::item("Run All Tests", RunAllTests, true),
+                MenuEntry::item("Refresh Tests", RefreshTests, open),
                 MenuEntry::separator(),
                 MenuEntry::item("Close Workspace", CloseWorkspace, open),
             ]
@@ -105,6 +110,8 @@ pub fn menu_entries(menu: MenuId, ed: &Editor) -> Vec<MenuEntry> {
             MenuEntry::item("Open Path…", OpenPath, true),
             MenuEntry::item("Save", Save, ed.has_doc()),
             MenuEntry::item("Save As…", SaveAs, ed.has_doc()),
+            MenuEntry::item("Format", FormatDocument, ed.has_doc()),
+            MenuEntry::item("Format and Save", FormatAndSave, ed.has_doc()),
             MenuEntry::item(
                 "Revert File",
                 RevertFile,
@@ -224,7 +231,8 @@ mod tests {
         assert_eq!(
             enabled(&ed),
             [
-                true, true, false, false, false, false, false, true, false, true, false
+                true, true, false, false, false, false, false, true, false, true, true, true, true,
+                true, false, false
             ]
         );
         let mut ws = Workspace::new("w");
@@ -240,10 +248,10 @@ mod tests {
         assert_eq!(next_item(&entries, None, 1), Some(0));
         assert_eq!(next_item(&entries, Some(1), 1), Some(8)); // jumps to Show Explorer
         assert_eq!(next_item(&entries, Some(8), 1), Some(10)); // Find in Files
-        assert_eq!(next_item(&entries, Some(10), 1), Some(0)); // wraps past disabled items
-        assert_eq!(next_item(&entries, Some(0), -1), Some(10));
+        assert_eq!(next_item(&entries, Some(14), 1), Some(0)); // wraps past disabled items
+        assert_eq!(next_item(&entries, Some(0), -1), Some(14));
         let file = menu_entries(MenuId::File, &ed);
-        assert_eq!(next_item(&file, Some(4), 1), Some(6)); // skips Revert: untitled tab
-        assert_eq!(next_item(&file, Some(6), 1), Some(8)); // skips the separator
+        assert_eq!(next_item(&file, Some(6), 1), Some(8)); // skips Revert: untitled tab
+        assert_eq!(next_item(&file, Some(8), 1), Some(10)); // skips the separator
     }
 }

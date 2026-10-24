@@ -9,7 +9,9 @@ use crate::editor::movement::{self as mv, char_width};
 use crate::editor::search::SearchOptions;
 use crate::editor::{Editor, MsgKind, PANEL};
 use crate::keymap;
+use crate::lint::Severity;
 use crate::syntax::{Span, Token};
+use crate::test_explorer::Status as TestStatus;
 use crate::theme::{Rgba, Theme};
 use crate::ui::find_panel::{Field, Row};
 use crate::ui::layout::{
@@ -843,6 +845,15 @@ fn draw_text_area(
     let (sel_s, sel_e) = doc.selection.range();
     // All selections in multi-cursor mode (just the primary one otherwise).
     let sels = doc.all_selections();
+    let diags = doc
+        .canonical
+        .as_ref()
+        .map_or(&[][..], |p| ed.problems.for_file(p));
+    let test_marks = doc
+        .canonical
+        .as_ref()
+        .map(|p| ed.test_marks(p))
+        .unwrap_or_default();
     // Find highlights belong to the focused document only.
     let query = if focused { ed.active_query() } else { None };
     let body = Rect::new(pl.area.x, pl.text.y, pl.area.w, pl.text.h);
@@ -904,6 +915,66 @@ fn draw_text_area(
                     theme.selection,
                 );
             }
+        }
+
+        // Lint problems: a gutter mark for the line's worst one, underlines under each.
+        let severity_color = |s: Severity| match s {
+            Severity::Error => theme.error,
+            _ => theme.warning,
+        };
+        if let Some(worst) = diags
+            .iter()
+            .filter(|d| d.line == line)
+            .map(|d| d.severity)
+            .min()
+        {
+            let w = (3.0 * l.scale).round().max(2.0);
+            b.rect(
+                Rect::new(pl.gutter.x, y, w, l.line_h),
+                severity_color(worst),
+            );
+        }
+        for d in diags
+            .iter()
+            .filter(|d| d.line <= line && d.end_line >= line)
+        {
+            let len = le - ls;
+            let s = if d.line == line { d.col.min(len) } else { 0 };
+            let mut e = if d.end_line == line {
+                d.end_col.min(len)
+            } else {
+                len
+            };
+            if e <= s {
+                e = s + 1;
+            }
+            let x0 = col_x(ls + s).max(pl.text.x);
+            let x1 = if ls + e <= le {
+                col_x(ls + e)
+            } else {
+                col_x(le) + l.cell_w
+            }
+            .min(pl.text.right());
+            let h = (2.0 * l.scale).round().max(1.0);
+            if x1 > x0 {
+                b.rect(
+                    Rect::new(x0, y + l.line_h - h, x1 - x0, h),
+                    severity_color(d.severity),
+                );
+            }
+        }
+
+        // Test status glyph at the right edge of the gutter.
+        if let Some((_, status)) = test_marks.iter().find(|(l, _)| *l == line) {
+            let color = match status {
+                TestStatus::Passed => theme.token(Token::Pass),
+                TestStatus::Failed => theme.error,
+                TestStatus::Running => theme.accent,
+                TestStatus::Skipped => theme.warning,
+                TestStatus::NotRun | TestStatus::NotRunnable => theme.fg_dim,
+            };
+            let glyph = crate::editor::status_glyph(*status).to_string();
+            b.label(glyph, pl.gutter.right() - l.cell_w * 1.1, y, color, body);
         }
 
         if ed.config.line_numbers {
@@ -1056,8 +1127,23 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
             doc.line_ending.label()
         ));
     }
+    // Problem counts at the far right (click: Problems page).
+    let mut right_end = l.width;
+    if let Some(chip) = l.problems_chip {
+        let (e, w) = ed.problems.counts();
+        let mut cx = chip.x + l.cell_w;
+        if e > 0 {
+            let t = format!("✖ {e}");
+            b.label(t.clone(), cx, y, theme.error, r);
+            cx += (t.width() + 2) as f32 * l.cell_w;
+        }
+        if w > 0 {
+            b.label(format!("⚠ {w}"), cx, y, theme.warning, r);
+        }
+        right_end = chip.x;
+    }
     let right_w = right.width() as f32 * l.cell_w;
-    let right_x = l.width - right_w - l.cell_w;
+    let right_x = right_end - right_w - l.cell_w;
     b.label(right, right_x, y, theme.statusbar_fg, r);
 
     // Left side: file path, cut from the left so the file name stays visible.
@@ -1094,14 +1180,29 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
 
     let shown = match tooltip {
         Some(t) => Some((t, theme.tab_fg_active)),
-        None => ed.message.as_ref().map(|msg| {
-            let color = match msg.kind {
-                MsgKind::Info => theme.fg_dim,
-                MsgKind::Warn => theme.warning,
-                MsgKind::Error => theme.error,
-            };
-            (msg.text.clone(), color)
-        }),
+        None => ed
+            .message
+            .as_ref()
+            .map(|msg| {
+                let color = match msg.kind {
+                    MsgKind::Info => theme.fg_dim,
+                    MsgKind::Warn => theme.warning,
+                    MsgKind::Error => theme.error,
+                };
+                (msg.text.clone(), color)
+            })
+            // Otherwise the problem on the cursor line, if any, or a failed test there.
+            .or_else(|| {
+                ed.cursor_diagnostic().map(|d| {
+                    let color = match d.severity {
+                        Severity::Error => theme.error,
+                        _ => theme.warning,
+                    };
+                    let code = d.code.as_deref().unwrap_or(d.source.name());
+                    (format!("{code}: {}", d.message), color)
+                })
+            })
+            .or_else(|| ed.cursor_test_failure().map(|m| (m, theme.error))),
     };
     if let Some((text, color)) = shown {
         let mx = x + 2.0 * l.cell_w;

@@ -508,6 +508,17 @@ pub fn state_json(session: &Session) -> String {
             hit.line + 1
         )))),
     );
+    let (errors, warnings) = ed.problems.counts();
+    let problems = format!(
+        "{{\"errors\":{errors},\"warnings\":{warnings},\"files\":{},\"linting\":{}}}",
+        ed.problems.file_count(),
+        !ed.lint_jobs.is_empty()
+    );
+    let (passed, failed, not_run, running) = ed.tests.tree.counts();
+    let tests = format!(
+        "{{\"total\":{},\"passed\":{passed},\"failed\":{failed},\"not_run\":{not_run},\"running\":{running}}}",
+        ed.tests.tree.tests.len()
+    );
     let menu = session.open_menu_id().map(|m| json_str(&format!("{m:?}")));
     let prompt = ed.minibuffer.as_ref().map(|m| json_str(&m.input));
     let message = ed.message.as_ref().map(|m| json_str(&m.text));
@@ -516,7 +527,7 @@ pub fn state_json(session: &Session) -> String {
 \"active\":{},\"tabs\":[{}],\"panes\":[{}],\"path\":{},\"dirty\":{},\"read_only\":{},\
 \"line\":{},\"col\":{},\"selection\":{},\"cursors\":{},\"lang\":{},\"line_text\":{},\"lines\":{},\"indent\":{},\
 \"line_ending\":{},\"picker\":{},\"prompt\":{},\"message\":{},\"font_size\":{},\
-\"workspace\":{},\"explorer\":{explorer},\"find\":{find}}}",
+\"workspace\":{},\"explorer\":{explorer},\"find\":{find},\"formatting\":{},\"problems\":{problems},\"tests\":{tests}}}",
         json_str(frame::mode_label(ed)),
         ed.focus,
         ed.split,
@@ -542,6 +553,7 @@ pub fn state_json(session: &Session) -> String {
         opt(message),
         ed.config.font_size,
         opt(workspace),
+        !ed.format_jobs.is_empty(),
     )
 }
 

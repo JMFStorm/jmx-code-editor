@@ -70,6 +70,10 @@ pub enum Command {
     SaveAs,
     /// Reload the file from disk, discarding unsaved changes (one undo step).
     RevertFile,
+    /// Format with Prettier (if the file type supports it) or clean up whitespace.
+    FormatDocument,
+    /// Format, then save (Ctrl+S pressed twice with Ctrl held).
+    FormatAndSave,
     CloseFile,
     NextTab,
     PrevTab,
@@ -87,6 +91,21 @@ pub enum Command {
     ToggleCase,
     ToggleWholeWord,
     ToggleRegex,
+    /// Run ESLint over the workspace and show the Problems page.
+    LintWorkspace,
+    /// Show the Problems page in the panel.
+    ShowProblems,
+    /// Go to the next / previous problem (lint error or warning).
+    NextProblem,
+    PrevProblem,
+    /// Show the Tests page in the panel.
+    ShowTests,
+    /// Run the test or suite at the cursor (or the selected Tests row).
+    RunTestAtCursor,
+    RunAllTests,
+    RunFailedTests,
+    /// Find tests in the workspace again.
+    RefreshTests,
 
     ScrollUp,
     ScrollDown,
@@ -142,11 +161,12 @@ pub enum Group {
     Search,
     Views,
     Workspace,
+    Tests,
     View,
 }
 
 impl Group {
-    pub const ALL: [Group; 10] = [
+    pub const ALL: [Group; 11] = [
         Group::File,
         Group::Tabs,
         Group::Move,
@@ -156,6 +176,7 @@ impl Group {
         Group::Search,
         Group::Views,
         Group::Workspace,
+        Group::Tests,
         Group::View,
     ];
 
@@ -170,6 +191,7 @@ impl Group {
             Group::Search => "Search & navigation",
             Group::Views => "Split views",
             Group::Workspace => "Workspace",
+            Group::Tests => "Tests",
             Group::View => "View & help",
         }
     }
@@ -207,6 +229,8 @@ impl Command {
             Save => "Save file",
             SaveAs => "Save file as",
             RevertFile => "Revert file: discard all unsaved changes",
+            FormatDocument => "Format file (Prettier if supported)",
+            FormatAndSave => "Format and save (Ctrl+S twice, Ctrl held)",
             CloseFile => "Close tab",
             NextTab => "Next tab",
             PrevTab => "Previous tab",
@@ -220,6 +244,15 @@ impl Command {
             ToggleCase => "Search option: match case",
             ToggleWholeWord => "Search option: whole word",
             ToggleRegex => "Search option: regular expression",
+            LintWorkspace => "Lint the workspace (ESLint) and show problems",
+            ShowProblems => "Show the Problems list",
+            NextProblem => "Next problem (error / warning)",
+            PrevProblem => "Previous problem",
+            ShowTests => "Show the Tests list",
+            RunTestAtCursor => "Run the test at the cursor",
+            RunAllTests => "Run all tests",
+            RunFailedTests => "Run failed tests",
+            RefreshTests => "Find tests again",
             ScrollUp => "Scroll up",
             ScrollDown => "Scroll down",
             ZoomIn => "Increase font size",
@@ -269,15 +302,19 @@ impl Command {
             Newline | Indent | Outdent | Backspace | Delete | DeleteWordLeft | DeleteWordRight
             | DeleteLine | MoveLineUp | MoveLineDown | DuplicateLine => Group::Edit,
             Copy | Cut | Paste | Undo | Redo => Group::Clipboard,
-            NewFile | OpenFile | OpenPath | Save | SaveAs | RevertFile | CloseFile | Quit
-            | FileMenu => Group::File,
+            NewFile | OpenFile | OpenPath | Save | SaveAs | RevertFile | FormatDocument
+            | FormatAndSave | CloseFile | Quit | FileMenu => Group::File,
             FocusOtherView | FocusLeft | FocusRight | ToggleSplit | ResetSplit => Group::Views,
             WorkspaceMenu | QuickOpen | ToggleExplorer | FocusExplorer | NewWorkspace
             | OpenWorkspace | SaveWorkspace | SaveWorkspaceAs | AddFolder | RemoveFolder
             | ToggleGitignore | CloseWorkspace => Group::Workspace,
             NextTab | PrevTab | GotoTab(_) => Group::Tabs,
             Find | FindNext | FindPrev | GotoLine | FindInFiles | NextResult | PrevResult
-            | ToggleCase | ToggleWholeWord | ToggleRegex => Group::Search,
+            | ToggleCase | ToggleWholeWord | ToggleRegex | LintWorkspace | ShowProblems
+            | NextProblem | PrevProblem => Group::Search,
+            ShowTests | RunTestAtCursor | RunAllTests | RunFailedTests | RefreshTests => {
+                Group::Tests
+            }
             ScrollUp | ScrollDown | ZoomIn | ZoomOut | ZoomReset | Help | ShowShortcuts => {
                 Group::View
             }

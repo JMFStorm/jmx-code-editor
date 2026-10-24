@@ -4,22 +4,24 @@
   "folders": [
     "."
   ],
-  "respect_gitignore": true,
+  "respect_gitignore": false,
   "state": {
     "split": true,
-    "split_ratio": 0.64293355,
+    "split_ratio": 0.5949096,
     "focus": 0,
     "font_size": 15.0,
     "explorer": {
       "visible": true,
-      "width_cols": 32.0,
+      "width_cols": 34.0,
       "expanded": [
-        "."
+        ".",
+        "sandbox",
+        "sandbox/vue-dashboard"
       ]
     },
     "panes": [
       {
-        "active": 10,
+        "active": 4,
         "tabs": [
           {
             "kind": "file",
@@ -32,101 +34,50 @@
           },
           {
             "kind": "file",
-            "path": "sandbox/vue-dashboard/index.html",
-            "anchor": 520,
-            "head": 520,
-            "top_line": 0,
+            "path": "src/main.rs",
+            "anchor": 1208,
+            "head": 1208,
+            "top_line": 35,
             "left_col": 0,
             "unsaved": null
           },
           {
             "kind": "file",
             "path": "sandbox/vue-dashboard/eslint.config.js",
-            "anchor": 423,
-            "head": 423,
+            "anchor": 557,
+            "head": 557,
             "top_line": 0,
             "left_col": 0,
             "unsaved": null
           },
           {
             "kind": "file",
-            "path": "sandbox/vue-dashboard/config/settings.xml",
-            "anchor": 699,
-            "head": 699,
-            "top_line": 5,
+            "path": "sandbox/vue-dashboard/src/main.js",
+            "anchor": 440,
+            "head": 440,
+            "top_line": 0,
             "left_col": 0,
             "unsaved": null
           },
           {
             "kind": "file",
-            "path": "src/main.rs",
-            "anchor": 1337,
-            "head": 1337,
-            "top_line": 40,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/vue-dashboard/public/logo.svg",
+            "path": "js-mock-test.jmxws",
             "anchor": 0,
             "head": 0,
             "top_line": 0,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/vue-dashboard/public/data/sales.csv",
-            "anchor": 0,
-            "head": 0,
-            "top_line": 0,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/vue-dashboard/src/api/client.js",
-            "anchor": 664,
-            "head": 664,
-            "top_line": 7,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/vue-dashboard/README.md",
-            "anchor": 0,
-            "head": 0,
-            "top_line": 0,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/vue-dashboard/package.json",
-            "anchor": 0,
-            "head": 0,
-            "top_line": 0,
-            "left_col": 0,
-            "unsaved": null
-          },
-          {
-            "kind": "file",
-            "path": "sandbox/vue-dashboard/src/components/TodoList.vue",
-            "anchor": 2387,
-            "head": 2387,
-            "top_line": 76,
             "left_col": 0,
             "unsaved": null
           }
         ]
       },
       {
-        "active": 0,
+        "active": 1,
         "tabs": [
           {
             "kind": "shortcuts"
+          },
+          {
+            "kind": "help"
           }
         ]
       }

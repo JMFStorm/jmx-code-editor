@@ -49,6 +49,8 @@ pub struct Layout {
     /// Explorer sidebar, when visible.
     pub sidebar: Option<SidebarLayout>,
     pub status: Rect,
+    /// Problem counts at the right end of the status bar (click: Problems page).
+    pub problems_chip: Option<Rect>,
     pub minibuffer: Option<Rect>,
     pub picker: Option<PickerLayout>,
     pub find: Option<FindLayout>,
@@ -93,6 +95,10 @@ impl Layout {
             .map(|_| Rect::new(0.0, height - bar_h, width, bar_h));
         let status_y = minibuffer.map_or(height, |r| r.y) - bar_h;
         let status = Rect::new(0.0, status_y, width, bar_h);
+        let problems_chip = problems_chip_cols(ed).map(|cols| {
+            let w = (cols as f32 * cell_w).round();
+            Rect::new(width - w, status_y, w, bar_h)
+        });
         let body_y = toolbar.bottom();
         let body_h = (status.y - body_y).max(0.0);
 
@@ -145,6 +151,7 @@ impl Layout {
             line_h,
             scale,
             find,
+            problems_chip,
             toolbar,
             panes,
             divider,
@@ -310,6 +317,22 @@ pub fn tab_rects(ed: &Editor, pl: &PaneLayout, scale: f32) -> Vec<TabRect> {
         }
     }
     tabs
+}
+
+/// Width in columns of the status bar problem counts (`✖ 2  ⚠ 3`), if there are any.
+fn problems_chip_cols(ed: &Editor) -> Option<usize> {
+    let (e, w) = ed.problems.counts();
+    if e == 0 && w == 0 {
+        return None;
+    }
+    let part = |n: usize| {
+        if n > 0 {
+            format!("✖ {n}").width() + 2
+        } else {
+            0
+        }
+    };
+    Some(1 + part(e) + part(w) + 1)
 }
 
 /// Geometry of the Find in Files panel.
@@ -537,7 +560,7 @@ mod tests {
             menu.item_at(first.rect.x + 2.0, first.rect.y + 2.0),
             Some(0)
         );
-        let sep = &menu.rows[7];
+        let sep = &menu.rows[9];
         assert_eq!(sep.entry.cmd, None);
         assert_eq!(menu.item_at(sep.rect.x + 2.0, sep.rect.y + 1.0), None);
         assert!(menu.panel.y >= l.toolbar.bottom());

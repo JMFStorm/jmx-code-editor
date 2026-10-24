@@ -115,8 +115,17 @@ impl Editor {
         self.find.debounce_at = Some(Instant::now() + DEBOUNCE);
     }
 
-    /// Collect background results. Returns true if anything visible changed.
+    /// Collect background results (search, formatting). Returns true if anything visible
+    /// changed.
     pub fn poll_jobs(&mut self) -> bool {
+        let formatted = self.poll_format();
+        let linted = self.poll_lint();
+        self.track_test_edits();
+        let tested = self.poll_tests();
+        self.poll_search() || formatted || linted || tested
+    }
+
+    fn poll_search(&mut self) -> bool {
         let mut changed = false;
         if self.find.debounce_at.is_some_and(|t| Instant::now() >= t) {
             self.restart_search();
@@ -149,16 +158,28 @@ impl Editor {
 
     /// When the app should call `poll_jobs` next, if anything is pending.
     pub fn next_deadline(&self) -> Option<Instant> {
-        let poll = self.find.running().then(|| Instant::now() + POLL);
-        match (self.find.debounce_at, poll) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let poll = if self.find.running() {
+            Some(Instant::now() + POLL)
+        } else if self.formatting() {
+            Some(Instant::now() + super::formatting::FORMAT_POLL)
+        } else if self.linting() {
+            Some(Instant::now() + super::linting::LINT_POLL)
+        } else {
+            None
+        };
+        [self.find.debounce_at, poll, self.tests_deadline()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Background work still running or scheduled.
     pub fn jobs_pending(&self) -> bool {
-        self.find.running() || self.find.debounce_at.is_some()
+        self.find.running()
+            || self.find.debounce_at.is_some()
+            || self.formatting()
+            || self.linting()
+            || self.tests_busy()
     }
 
     /// Wait (blocking) until background work is done, up to `timeout`. For headless scripts.
@@ -223,13 +244,16 @@ impl Editor {
                 }
             }
             ToggleCase | ToggleWholeWord | ToggleRegex | ZoomIn | ZoomOut | ZoomReset | Save
-            | Quit | NextResult | PrevResult => return false,
+            | FormatAndSave | NextProblem | PrevProblem | Quit | NextResult | PrevResult => {
+                return false;
+            }
             // Anything that leaves the panel (opening files, switching views, ...) closes it.
             NewFile | OpenFile | OpenPath | Help | ShowShortcuts | CloseFile | NextTab
             | PrevTab | GotoTab(_) | FocusOtherView | FocusLeft | FocusRight | ToggleSplit
             | QuickOpen | ToggleExplorer | FocusExplorer | NewWorkspace | OpenWorkspace
             | SaveWorkspace | SaveWorkspaceAs | AddFolder | RemoveFolder | ToggleGitignore
-            | CloseWorkspace | Find | GotoLine | FileMenu | WorkspaceMenu | SelectionMenu => {
+            | CloseWorkspace | Find | GotoLine | FileMenu | WorkspaceMenu | SelectionMenu
+            | LintWorkspace | ShowProblems => {
                 f.open = false;
                 return false;
             }

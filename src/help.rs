@@ -34,6 +34,60 @@ CSS, C# (.cs) and Vue files (template, script and style parts) are
 colored. The
 language is shown in the status bar.
 
+Formatting
+----------
+  Ctrl+S, S        hold Ctrl and press S twice: format the file, then save
+  Shift+Alt+F      format the file without saving
+JavaScript, TypeScript, JSON, CSS/SCSS/Less, HTML, Vue, Markdown, YAML and
+GraphQL files are formatted with Prettier. JMX uses the project's own
+Prettier (node_modules/.bin/prettier in the file's folder or a parent) or
+one installed globally; install it with: npm i -D prettier (needs Node.js).
+Prettier reads its settings from the nearest .prettierrc, prettier.config.*,
+the prettier key of package.json or .editorconfig, so a config file applies to
+its folder and everything below it; .prettierignore is respected.
+Other files (C#, XML, plain text) get a basic cleanup: trailing spaces
+removed and a single newline at the end. Formatting is one undo step.
+
+Linting and problems
+--------------------
+In projects with ESLint (an eslint.config.js and ESLint installed with
+npm i -D eslint), JavaScript, TypeScript and Vue files are linted when they
+are opened and every time they are saved.
+  Ctrl+Shift+M     lint the whole workspace and show the Problems list
+  F4 / Shift+F4    go to the next / previous problem
+  Ctrl+S, S        also applies ESLint's automatic fixes (after Prettier)
+Problems are underlined in the code (red: error, yellow: warning) and marked
+next to the line numbers; the problem on the cursor line is shown in the
+status bar, and the counts at its right end open the Problems list. Marks
+stay where ESLint reported them until the file is linted again (on save).
+
+The Problems list opens in the panel. Moving through it with Up/Down shows
+each problem in the editor right away while the cursor stays in the list;
+Enter (or a double-click) opens it and moves the cursor there.
+
+Tests
+-----
+The Tests list (Ctrl+Shift+T, in the panel) shows the tests of the workspace:
+spec and test files (Vitest or Jest: describe / it / test), Storybook stories
+(*.stories.js/ts) and C# test methods (xUnit, NUnit, MSTest).
+  F5               run the test (or describe block / test class) at the
+                   cursor; in the Tests list: the selected test, file or project
+  Shift+F5         run all tests
+  Ctrl+F5          run the failed tests again
+In the Tests list: Up/Down show a test in the editor, Enter opens it,
+r run, a run all, f run failed, Space folds a group, Esc stops a run.
+The list follows your edits as you type: a new test appears at once, and a
+test whose code you change goes back to not run (changing it back brings
+the result back). Changes made outside JMX (git checkout ...) are picked up
+too. Stories run through Vitest when the project uses Storybook's Vitest
+addon; otherwise they are listed only. A mark next to the line numbers shows
+each test's status; the failure message shows in the status bar.
+
+C# projects are built in the background (dotnet build) when a .cs file is
+saved; compiler errors and warnings appear in the Problems list. Saving a
+config file (eslint.config.js, package.json, tsconfig.json, .csproj,
+Directory.Build.props, .editorconfig ...) runs the affected checks again.
+
 Editing extras
 --------------
   Ctrl+K           delete the line

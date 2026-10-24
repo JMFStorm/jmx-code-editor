@@ -426,3 +426,313 @@ fn reopens_the_last_workspace() {
     assert!(states(&out)[0].contains("\"workspace\":null"));
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn ctrl_s_twice_formats_and_saves() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("format");
+    // A stand-in for Prettier: uppercases its input.
+    let fake = dir.join("fake-prettier");
+    fs::write(&fake, "#!/bin/sh\ntr a-z A-Z\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let js = dir.join("a.js");
+    fs::write(&js, "let x = 1\n").unwrap();
+    let cs = dir.join("B.cs");
+    fs::write(&cs, "class B { }   \n\n\n").unwrap();
+    let script = "key end\n\
+                  type ;\n\
+                  key ctrl+s\n\
+                  state\n\
+                  key ctrl+s\n\
+                  key ctrl+s\n\
+                  state\n\
+                  type // more\n\
+                  key shift+alt+f\n\
+                  state\n\
+                  key ctrl+tab\n\
+                  key ctrl+s\n\
+                  key ctrl+s\n\
+                  state\n\
+                  quit\n";
+    let script_path = dir.join("fmt.jmxs");
+    fs::write(&script_path, script).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+        .args(["--headless", "--size=640x400"])
+        .arg("--log-dir")
+        .arg(dir.join("logs"))
+        .arg("--script")
+        .arg(&script_path)
+        .arg(&js)
+        .arg(&cs)
+        .env("JMX_PRETTIER", &fake)
+        .output()
+        .expect("failed to start jmx");
+    if out.status.code() == Some(EXIT_NO_GPU) {
+        return;
+    }
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = states(&out);
+    // One Ctrl+S: saved as typed.
+    assert!(s[0].contains("\"line_text\":\"let x = 1;\""), "{}", s[0]);
+    // Ctrl held, S S: formatted and saved.
+    assert!(s[1].contains("\"line_text\":\"LET X = 1;\""), "{}", s[1]);
+    assert!(s[1].contains("\"dirty\":false"), "{}", s[1]);
+    // Shift+Alt+F: formatted, not saved.
+    assert!(
+        s[2].contains("\"line_text\":\"LET X = 1;// MORE\""),
+        "{}",
+        s[2]
+    );
+    assert!(s[2].contains("\"dirty\":true"), "{}", s[2]);
+    assert_eq!(fs::read_to_string(&js).unwrap(), "LET X = 1;\n");
+    // C#: basic cleanup and save.
+    assert_eq!(fs::read_to_string(&cs).unwrap(), "class B { }\n");
+    assert!(s[3].contains("\"dirty\":false"), "{}", s[3]);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn eslint_problems_page_and_navigation() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("eslint");
+    let dir = fs::canonicalize(&dir).unwrap();
+    fs::write(dir.join("eslint.config.js"), "export default [];\n").unwrap();
+    let a = dir.join("a.js");
+    let b = dir.join("b.js");
+    fs::write(&a, "const a = 1;\nlet x;\nfoo();\nbar();\n").unwrap();
+    fs::write(&b, "b();\n").unwrap();
+    // ESLint stand-in: one warning for a --stdin run, the whole project otherwise.
+    let full = format!(
+        r#"[{{"filePath":"{a}","messages":[{{"ruleId":"no-undef","severity":2,"message":"'foo' is not defined.","line":3,"column":1,"endLine":3,"endColumn":4}},{{"ruleId":"no-unused-vars","severity":1,"message":"'x' is never used.","line":2,"column":5}}]}},{{"filePath":"{b}","messages":[{{"ruleId":"no-undef","severity":1,"message":"'b' is not defined.","line":1,"column":1}}]}}]"#,
+        a = a.display(),
+        b = b.display()
+    );
+    let fake = dir.join("fake-eslint");
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\ncase \"$*\" in\n  *--stdin*) eval last=\\${{$#}}; printf '[{{\"filePath\":\"%s\",\"messages\":[{{\"ruleId\":\"semi\",\"severity\":1,\"message\":\"Missing semicolon.\",\"line\":1,\"column\":5}}]}}]\\n' \"$last\";;\n  *) printf '%s\\n' '{full}';;\nesac\nexit 1\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let shot = dir.join("problems.png");
+    let script = format!(
+        "state\n\
+         key ctrl+shift+m\n\
+         state\n\
+         key down\nkey down\nkey down\nkey down\n\
+         state\n\
+         shot {}\n\
+         key enter\n\
+         state\n\
+         key f4\n\
+         state\n\
+         quit\n",
+        shot.display()
+    );
+    let script_path = dir.join("lint.jmxs");
+    fs::write(&script_path, script).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+        .args(["--headless", "--size=900x500"])
+        .arg("--log-dir")
+        .arg(dir.join("logs"))
+        .arg("--script")
+        .arg(&script_path)
+        .arg(&a)
+        .env("JMX_ESLINT", &fake)
+        .output()
+        .expect("failed to start jmx");
+    if out.status.code() == Some(EXIT_NO_GPU) {
+        return;
+    }
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = states(&out);
+    // Opening a.js linted it.
+    assert!(
+        s[0].contains("\"problems\":{\"errors\":0,\"warnings\":1,\"files\":1"),
+        "{}",
+        s[0]
+    );
+    // Ctrl+Shift+M: the whole project, with the Problems page in the panel.
+    assert!(
+        s[1].contains("\"problems\":{\"errors\":1,\"warnings\":2,\"files\":2"),
+        "{}",
+        s[1]
+    );
+    assert!(s[1].contains("\"focus\":1"), "{}", s[1]);
+    assert!(s[1].contains("\"title\":\"Problems\""), "{}", s[1]);
+    // Down to the first problem row: focus stays in the panel.
+    assert!(s[2].contains("\"focus\":1"), "{}", s[2]);
+    assert!(s[2].contains("x is never used"), "{}", s[2]);
+    // Enter: the editor at a.js line 2.
+    assert!(s[3].contains("\"focus\":0"), "{}", s[3]);
+    assert!(s[3].contains("\"line\":2,\"col\":5"), "{}", s[3]);
+    // F4: the next problem, line 3.
+    assert!(s[4].contains("\"line\":3,\"col\":1"), "{}", s[4]);
+    assert!(s[4].contains("Problem 2/3"), "{}", s[4]);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn tests_view_runs_syncs_and_builds() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("testview");
+    let dir = fs::canonicalize(&dir).unwrap();
+    let web = dir.join("web");
+    let api = dir.join("Api.Tests");
+    fs::create_dir_all(web.join("tests")).unwrap();
+    fs::create_dir_all(web.join("node_modules/.bin")).unwrap();
+    fs::create_dir_all(&api).unwrap();
+    fs::write(
+        web.join("package.json"),
+        r#"{"devDependencies":{"vitest":"^2"}}"#,
+    )
+    .unwrap();
+    let spec = web.join("tests/a.spec.js");
+    fs::write(
+        &spec,
+        "describe('s', () => {\n  it('one', () => {\n    expect(1).toBe(1);\n  });\n  it('two', () => {});\n});",
+    )
+    .unwrap();
+    fs::write(
+        api.join("Api.Tests.csproj"),
+        "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>",
+    )
+    .unwrap();
+    let cs = api.join("CalcTests.cs");
+    fs::write(
+        &cs,
+        "namespace Api.Tests;\n\npublic class CalcTests\n{\n    [Fact]\n    public void Adds() { Assert.Equal(2, 1 + 1); }\n}\n",
+    )
+    .unwrap();
+    let ws = dir.join("w.jmxws");
+    fs::write(
+        &ws,
+        r#"{"version":1,"name":"w","folders":["web","Api.Tests"],"respect_gitignore":true}"#,
+    )
+    .unwrap();
+
+    let make = |path: &Path, body: String| {
+        fs::write(path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let report = format!(
+        r#"{{"testResults":[{{"name":"{}","assertionResults":[{{"ancestorTitles":["s"],"title":"one","status":"passed","duration":3}},{{"ancestorTitles":["s"],"title":"two","status":"failed","failureMessages":["boom"]}}]}}]}}"#,
+        spec.display()
+    );
+    make(
+        &web.join("node_modules/.bin/vitest"),
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --outputFile=*) out=\"${{a#--outputFile=}}\";; esac; done\nprintf '%s' '{report}' > \"$out\"\nexit 1\n"
+        ),
+    );
+    let trx = r#"<TestRun><Results><UnitTestResult testId="1" testName="Api.Tests.CalcTests.Adds" outcome="Passed" duration="00:00:00.0010000" /></Results><TestDefinitions><UnitTest id="1"><TestMethod className="Api.Tests.CalcTests" name="Adds" /></UnitTest></TestDefinitions></TestRun>"#;
+    let warning = format!(
+        "{}(6,25): warning CS0219: The variable 'z' is assigned but its value is never used [{}]",
+        cs.display(),
+        api.join("Api.Tests.csproj").display()
+    );
+    let dotnet = dir.join("fake-dotnet");
+    make(
+        &dotnet,
+        format!(
+            "#!/bin/sh\necho '{warning}'\nif [ \"$1\" = test ]; then\n  for a in \"$@\"; do case \"$a\" in 'trx;LogFileName='*) out=\"${{a#trx;LogFileName=}}\";; esac; done\n  printf '%s' '{trx}' > \"$out\"\nfi\n"
+        ),
+    );
+
+    let script = "wait\n\
+                  state\n\
+                  key ctrl+shift+t\n\
+                  key shift+f5\n\
+                  wait\n\
+                  state\n\
+                  key ctrl+1\n\
+                  key alt+1\n\
+                  key ctrl+home\n\
+                  key down\n\
+                  key end\n\
+                  key enter\n\
+                  type     x();\n\
+                  wait\n\
+                  state\n\
+                  key ctrl+end\n\
+                  key enter\n\
+                  type it('three', () => {});\n\
+                  wait\n\
+                  state\n\
+                  key ctrl+tab\n\
+                  key ctrl+s\n\
+                  wait\n\
+                  state\n\
+                  quit\n";
+    let script_path = dir.join("tv.jmxs");
+    fs::write(&script_path, script).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_jmx"))
+        .args(["--headless", "--size=900x500"])
+        .arg("--log-dir")
+        .arg(dir.join("logs"))
+        .arg("--script")
+        .arg(&script_path)
+        .arg(&ws)
+        .arg(&spec)
+        .arg(&cs)
+        .env("JMX_DOTNET", &dotnet)
+        .output()
+        .expect("failed to start jmx");
+    if out.status.code() == Some(EXIT_NO_GPU) {
+        return;
+    }
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = states(&out);
+    let tests = |i: usize| {
+        let st = &s[i];
+        st[st.find("\"tests\":").unwrap()..].to_string()
+    };
+    // Found: two specs and one C# test.
+    assert!(
+        tests(0).contains("\"total\":3,\"passed\":0,\"failed\":0,\"not_run\":3"),
+        "{}",
+        tests(0)
+    );
+    // Shift+F5: everything ran.
+    assert!(
+        tests(1).contains("\"passed\":2,\"failed\":1,\"not_run\":0"),
+        "{}",
+        tests(1)
+    );
+    // Editing test 'one' turns it back to not run.
+    assert!(
+        tests(2).contains("\"passed\":1,\"failed\":1,\"not_run\":1"),
+        "{}",
+        tests(2)
+    );
+    // A newly typed test appears, not run.
+    assert!(
+        tests(3).contains("\"total\":4") && tests(3).contains("\"not_run\":2"),
+        "{}",
+        tests(3)
+    );
+    // Saving the C# file builds it: the compiler warning is in Problems.
+    assert!(
+        s[4].contains("\"problems\":{\"errors\":0,\"warnings\":1"),
+        "{}",
+        s[4]
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}

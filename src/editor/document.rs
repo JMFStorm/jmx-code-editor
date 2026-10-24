@@ -72,6 +72,10 @@ pub struct Document {
     pub virtual_name: Option<String>,
     /// Language and highlighting state.
     pub syntax: Syntax,
+    /// Canonical form of `path` (for matching diagnostics and tool output).
+    pub canonical: Option<PathBuf>,
+    /// Bumped on every text change (edits, undo, redo), to detect stale background results.
+    pub revision: u64,
 }
 
 impl Document {
@@ -95,6 +99,8 @@ impl Document {
             read_only: false,
             virtual_name: None,
             syntax: Syntax::new(Lang::Plain),
+            revision: 0,
+            canonical: None,
         }
     }
 
@@ -113,6 +119,7 @@ impl Document {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let mut doc = Self::new_empty(Some(path.to_path_buf()), tab_width);
+                doc.canonical = Some(canonical_path(path));
                 doc.syntax.set_lang(Lang::from_path(path));
                 return Ok(doc);
             }
@@ -120,6 +127,7 @@ impl Document {
         };
         let mut doc = Self::from_bytes(&bytes, tab_width);
         doc.path = Some(path.to_path_buf());
+        doc.canonical = Some(canonical_path(path));
         doc.syntax.set_lang(Lang::from_path(path));
         Ok(doc)
     }
@@ -384,6 +392,7 @@ impl Document {
 
     /// Highlighting from the first changed line on is out of date.
     fn text_changed(&mut self, changes: &[Change]) {
+        self.revision += 1;
         if let Some(first) = changes.iter().map(|c| c.start).min() {
             let pos = first.min(self.rope.len_chars());
             self.syntax.invalidate_from(self.rope.char_to_line(pos));
@@ -422,6 +431,23 @@ impl Document {
 }
 
 /// Guess indentation style (tabs vs. spaces, and the space width) from the first lines.
+/// `path` with symlinks and `..` resolved; for a file that does not exist yet, its folder.
+pub fn canonical_path(path: &Path) -> PathBuf {
+    if let Ok(p) = fs::canonicalize(path) {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => fs::canonicalize(if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        })
+        .map(|d| d.join(name))
+        .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// For `a` starting at or before `b`: they share text, or start at the same place.
 fn overlaps(a: Selection, b: Selection) -> bool {
     let (a0, a1) = a.range();

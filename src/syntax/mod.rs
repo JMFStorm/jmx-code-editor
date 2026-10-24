@@ -7,6 +7,8 @@ mod css;
 mod js;
 mod json;
 mod markup;
+mod problems;
+mod tests_page;
 
 use std::path::Path;
 
@@ -26,6 +28,10 @@ pub enum Lang {
     JavaScript,
     Css,
     CSharp,
+    /// The Problems page (not a file type).
+    Problems,
+    /// The Tests page.
+    Tests,
 }
 
 impl Lang {
@@ -57,6 +63,8 @@ impl Lang {
             Lang::JavaScript => "JavaScript",
             Lang::Css => "CSS",
             Lang::CSharp => "C#",
+            Lang::Problems => "Problems",
+            Lang::Tests => "Tests",
         }
     }
 }
@@ -81,6 +89,12 @@ pub enum Token {
     Regex,
     Entity,
     Escape,
+    /// Problem severities (Problems page).
+    Error,
+    Warning,
+    /// Test statuses (Tests page).
+    Pass,
+    Running,
 }
 
 /// A colored range of a line, in chars.
@@ -116,6 +130,8 @@ pub fn highlight_line(lang: Lang, state: &State, line: &str) -> (Vec<Span>, Stat
         Lang::JavaScript => js::lex(&mut lx, &mut st.js, chars.len()),
         Lang::Css => css::lex(&mut lx, &mut st.css, chars.len()),
         Lang::CSharp => csharp::lex(&mut lx, &mut st.csharp, chars.len()),
+        Lang::Problems => problems::lex(&mut lx),
+        Lang::Tests => tests_page::lex(&mut lx),
         Lang::Xml | Lang::Html | Lang::Vue => markup::lex(&mut lx, &mut st, lang),
     }
     (lx.spans, st)
@@ -323,6 +339,8 @@ mod tests {
             Lang::JavaScript,
             Lang::Css,
             Lang::CSharp,
+            Lang::Problems,
+            Lang::Tests,
         ];
         let chars: Vec<char> = sample.chars().collect();
         for lang in langs {

@@ -22,6 +22,8 @@ pub struct Session {
     pub editor: Editor,
     pub layout: Option<Layout>,
     pub modifiers: ModifiersState,
+    /// Ctrl+S was just pressed and Ctrl is still held: another S formats and saves.
+    save_armed: bool,
     /// Target size in physical pixels and the display scale factor.
     size: (u32, u32),
     scale: f32,
@@ -46,6 +48,7 @@ impl Session {
             editor,
             layout: None,
             modifiers: ModifiersState::empty(),
+            save_armed: false,
             size: (width, height),
             scale,
             mouse: (0.0, 0.0),
@@ -144,11 +147,28 @@ impl Session {
     // ---------------------------------------------------------------- keyboard
 
     /// A key press: menu navigation, then shortcut lookup, otherwise typed text.
+    /// Modifier keys changed. Releasing Ctrl ends a Ctrl+S, S gesture.
+    pub fn set_modifiers(&mut self, state: ModifiersState) {
+        if !state.control_key() {
+            self.save_armed = false;
+        }
+        self.modifiers = state;
+    }
+
     /// A key press: `key` as typed, `base` the same key without modifiers (layout-independent
     /// shortcuts are matched on it first).
     pub fn key(&mut self, key: &Key, base: &Key, text: Option<&str>) {
-        let cmd =
+        let mut cmd =
             keymap::lookup(self.modifiers, base).or_else(|| keymap::lookup(self.modifiers, key));
+        // Ctrl+S, S (Ctrl held): the second press formats and saves.
+        if cmd == Some(Command::Save) {
+            if self.save_armed {
+                cmd = Some(Command::FormatAndSave);
+            }
+            self.save_armed = true;
+        } else {
+            self.save_armed = false;
+        }
         log::trace!(
             "key {key:?} mods {:?} text {text:?} -> {cmd:?}",
             self.modifiers
@@ -336,6 +356,11 @@ impl Session {
             } else {
                 self.close_menu();
             }
+            return;
+        }
+        // Problem counts in the status bar open the Problems page.
+        if layout.problems_chip.is_some_and(|c| c.contains(x, y)) {
+            self.editor.execute(Command::ShowProblems);
             return;
         }
         // Toolbar buttons act on release, like ordinary buttons.
@@ -556,7 +581,8 @@ impl Session {
                 CursorIcon::Default
             };
         }
-        if self.ui.hover_button.is_some() {
+        if self.ui.hover_button.is_some() || layout.problems_chip.is_some_and(|c| c.contains(x, y))
+        {
             return CursorIcon::Pointer;
         }
         if self.dragging_divider

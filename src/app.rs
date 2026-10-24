@@ -175,7 +175,7 @@ impl ApplicationHandler for App {
                 }
                 self.after_input(event_loop);
             }
-            WindowEvent::ModifiersChanged(m) => self.session.modifiers = m.state(),
+            WindowEvent::ModifiersChanged(m) => self.session.set_modifiers(m.state()),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;

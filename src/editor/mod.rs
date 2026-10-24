@@ -1,6 +1,10 @@
 pub mod document;
 mod find_files;
+mod formatting;
 pub mod history;
+mod linting;
+mod testing;
+pub use testing::status_glyph;
 pub mod movement;
 mod multi;
 pub mod search;
@@ -100,6 +104,18 @@ pub struct Editor {
     /// Find in Files panel; kept when closed so the results can be reopened and stepped.
     pub find: FindPanel,
     pub should_quit: bool,
+    /// Prettier runs in progress.
+    pub format_jobs: Vec<crate::format::FormatJob>,
+    /// Lint errors and warnings, for the Problems page and the editor markers.
+    pub problems: crate::lint::Problems,
+    /// ESLint runs in progress.
+    pub lint_jobs: Vec<crate::lint::eslint::LintJob>,
+    /// What each line of the Problems page points at.
+    pub problem_rows: Vec<Option<linting::Target>>,
+    /// File opened only to preview a problem; the next preview replaces it.
+    preview_doc: Option<PathBuf>,
+    /// Test explorer, builds and file watching.
+    pub tests: testing::TestState,
     /// Where the last workspace is remembered; `None` in headless runs and tests.
     pub state_file: Option<PathBuf>,
     clipboard: Option<arboard::Clipboard>,
@@ -131,6 +147,12 @@ impl Editor {
             find: FindPanel::default(),
             should_quit: false,
             state_file: None,
+            format_jobs: Vec::new(),
+            problems: crate::lint::Problems::default(),
+            lint_jobs: Vec::new(),
+            problem_rows: Vec::new(),
+            preview_doc: None,
+            tests: testing::TestState::default(),
             clipboard,
             internal_clip: String::new(),
             line_clip: None,
@@ -262,6 +284,12 @@ impl Editor {
             self.prompt_changed();
             return;
         }
+        if self.on_tests_page() {
+            if let Some(c) = text.chars().next() {
+                self.tests_page_key(c);
+            }
+            return;
+        }
         if self.explorer.focused {
             // Space opens/toggles, letters jump to the next matching entry.
             match text.chars().next() {
@@ -280,9 +308,11 @@ impl Editor {
         }
         if self.multi_cursor() {
             self.multi_insert(text);
+            self.track_test_edits();
             return;
         }
         self.doc_mut().replace_selection(text, EditKind::Insert);
+        self.track_test_edits();
         self.ensure_cursor_visible();
     }
 
@@ -302,6 +332,18 @@ impl Editor {
         }
         use Command::*;
         if !self.has_doc() && needs_doc(cmd) {
+            return;
+        }
+        // Enter on a Problems row opens that problem; on the Tests page, the test.
+        if cmd == Newline && self.on_problems_page() {
+            self.open_problem();
+            return;
+        }
+        if cmd == Newline && self.on_tests_page() {
+            self.open_test();
+            return;
+        }
+        if cmd == Cancel && self.on_tests_page() && self.cancel_tests() {
             return;
         }
         if modifies_text(cmd) && self.doc().read_only {
@@ -378,6 +420,8 @@ impl Editor {
             }
             Save => self.save(AfterSave::Nothing),
             SaveAs => self.prompt_save_as(AfterSave::Nothing),
+            FormatDocument => self.format_document(false),
+            FormatAndSave => self.format_document(true),
             RevertFile => {
                 let tab = self.config.tab_width;
                 let title = self.doc().title();
@@ -425,6 +469,21 @@ impl Editor {
             NextResult => self.step_result(true),
             PrevResult => self.step_result(false),
             ToggleCase | ToggleWholeWord | ToggleRegex => self.toggle_search_option(cmd),
+            LintWorkspace => {
+                self.lint_workspace();
+                self.build_workspace();
+            }
+            ShowTests => self.show_tests(),
+            RunTestAtCursor => self.run_test_at_cursor(),
+            RunAllTests => self.run_tests(testing::RunWhat::All),
+            RunFailedTests => self.run_tests(testing::RunWhat::Failed),
+            RefreshTests => {
+                self.start_test_explorer();
+                self.show_tests();
+            }
+            ShowProblems => self.show_problems(),
+            NextProblem => self.step_problem(true),
+            PrevProblem => self.step_problem(false),
             ScrollUp => self.scroll(-1),
             ScrollDown => self.scroll(1),
             ZoomIn => self.zoom(self.config.font_size + 1.0),
@@ -517,6 +576,14 @@ impl Editor {
         if !keep_scroll {
             self.ensure_cursor_visible();
         }
+        // Moving through the Problems page shows each problem in the editor.
+        if matches!(cmd, Move(..)) && self.on_problems_page() {
+            self.preview_problem();
+        }
+        if matches!(cmd, Move(..)) && self.on_tests_page() {
+            self.preview_test();
+        }
+        self.track_test_edits();
     }
 
     /// Compute highlighting state down to the last visible line of every shown document.
@@ -618,7 +685,9 @@ impl Editor {
             | PrevTab | GotoTab(_) | FocusOtherView | FocusLeft | FocusRight | ToggleSplit
             | QuickOpen | ToggleExplorer | FocusExplorer | NewWorkspace | OpenWorkspace
             | SaveWorkspace | SaveWorkspaceAs | AddFolder | RemoveFolder | ToggleGitignore
-            | CloseWorkspace | FindInFiles | NextResult | PrevResult => {
+            | CloseWorkspace | FindInFiles | NextResult | PrevResult | LintWorkspace
+            | ShowProblems | NextProblem | PrevProblem | ShowTests | RunTestAtCursor
+            | RunAllTests | RunFailedTests | RefreshTests => {
                 self.picker = None;
                 return false;
             }
@@ -751,6 +820,20 @@ impl Editor {
         doc.goal_col = None;
         doc.history.break_coalescing();
         self.ensure_cursor_visible();
+        if self.on_problems_page() {
+            if count >= 2 {
+                self.open_problem();
+            } else {
+                self.preview_problem();
+            }
+        }
+        if self.on_tests_page() {
+            if count >= 2 {
+                self.open_test();
+            } else {
+                self.preview_test();
+            }
+        }
     }
 
     pub fn drag_to(&mut self, pos: usize) {
@@ -1183,6 +1266,8 @@ impl Editor {
                     pane.docs.push(doc);
                     pane.active = pane.docs.len() - 1;
                 }
+                let (p, i) = (self.focus, self.pane().active);
+                self.lint_doc(p, i);
                 if lossy {
                     self.warn("File is not valid UTF-8; invalid bytes were replaced and will be lost on save");
                 } else if !exists {
@@ -1214,6 +1299,11 @@ impl Editor {
                     doc.line_ending.label()
                 );
                 self.info(msg);
+                let (p, i) = (self.focus, self.pane().active);
+                self.lint_doc(p, i);
+                if let Some(path) = self.doc().path.clone() {
+                    self.after_save_checks(&path);
+                }
                 self.after_save(after);
             }
             Err(e) => {
@@ -1373,6 +1463,7 @@ impl Editor {
         self.explorer.visible = true;
         self.explorer.rebuild(self.workspace.as_ref());
         self.info(format!("Added {}", path.display()));
+        self.start_test_explorer();
     }
 
     fn remove_folder(&mut self, path: &Path) {
@@ -1388,6 +1479,10 @@ impl Editor {
         self.explorer.forget(path);
         self.explorer.rebuild(self.workspace.as_ref());
         self.info(format!("Removed {} from the workspace", path.display()));
+        let tree = &mut self.tests.tree;
+        tree.tests.retain(|t| !t.file.starts_with(path));
+        tree.projects.retain(|p| !p.root.starts_with(path));
+        self.start_test_explorer();
     }
 
     fn save_workspace(&mut self) {
@@ -1466,6 +1561,7 @@ impl Editor {
                     .map_or(String::new(), |w| w.name.clone());
                 log::info!("opened workspace {name} from {}", path.display());
                 self.remember_workspace();
+                self.start_test_explorer();
                 if missing.is_empty() {
                     self.info(format!("Opened workspace {name}"));
                 } else {
@@ -1487,6 +1583,7 @@ impl Editor {
         }
         self.remember_workspace();
         self.explorer = Explorer::default();
+        self.stop_test_explorer();
         self.find.open = false;
         self.find.clear_results();
         self.panes = [Pane::default(), Pane::default()];
@@ -1685,8 +1782,8 @@ impl Editor {
             }
             Find if is_find => return true,
             // Let these work while a prompt is open.
-            ZoomIn | ZoomOut | ZoomReset | Save | Quit | ScrollUp | ScrollDown | ToggleCase
-            | ToggleWholeWord | ToggleRegex => return false,
+            ZoomIn | ZoomOut | ZoomReset | Save | FormatAndSave | Quit | ScrollUp | ScrollDown
+            | ToggleCase | ToggleWholeWord | ToggleRegex => return false,
             _ => return true,
         }
         if matches!(cmd, Backspace | Delete | DeleteWordLeft) {
@@ -1752,6 +1849,7 @@ impl Editor {
                 {
                     self.doc_mut().path = old;
                 } else if self.has_doc() && self.doc().path.as_ref() == Some(&path) {
+                    self.doc_mut().canonical = Some(document::canonical_path(&path));
                     // A new name may mean a new language.
                     let lang = crate::syntax::Lang::from_path(&path);
                     if self.doc().syntax.lang != lang {
@@ -1985,6 +2083,15 @@ fn needs_doc(cmd: Command) -> bool {
             | ResetSplit
             | FileMenu
             | SelectionMenu
+            | LintWorkspace
+            | ShowProblems
+            | NextProblem
+            | PrevProblem
+            | ShowTests
+            | RunTestAtCursor
+            | RunAllTests
+            | RunFailedTests
+            | RefreshTests
             | ZoomIn
             | ZoomOut
             | ZoomReset

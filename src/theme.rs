@@ -55,6 +55,10 @@ impl Theme {
             Token::Type => hex(0xe5c07b),
             Token::Regex | Token::Escape | Token::Entity => hex(0x56b6c2),
             Token::Punct => hex(0xabb2bf),
+            Token::Error => self.error,
+            Token::Warning => self.warning,
+            Token::Pass => hex(0x98c379),
+            Token::Running => self.accent,
         }
     }
 }
