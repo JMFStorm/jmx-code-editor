@@ -6,12 +6,16 @@ use unicode_width::UnicodeWidthStr;
 use super::quads::Quad;
 use super::text::TextItem;
 use crate::editor::movement::{self as mv, char_width};
-use crate::editor::{Editor, MsgKind};
+use crate::editor::search::SearchOptions;
+use crate::editor::{Editor, MsgKind, PANEL};
 use crate::keymap;
 use crate::theme::{Rgba, Theme};
+use crate::ui::find_panel::{Field, Row};
 use crate::ui::layout::{
-    Layout, PaneLayout, PickerLayout, Rect, file_menu_layout, tab_rects, toolbar_buttons,
+    CHIP_LABELS, FindLayout, Layout, PaneLayout, PickerLayout, Rect, SidebarLayout, chip_rects,
+    tab_rects, toolbar_buttons,
 };
+use crate::ui::menu::{MenuId, menu_layout};
 use crate::ui::minibuffer::PromptKind;
 
 #[derive(Default)]
@@ -30,11 +34,13 @@ pub struct FrameData {
 pub struct UiState {
     pub hover_button: Option<usize>,
     pub pressed_button: Option<usize>,
-    /// File menu dropdown is open; `menu_hover` is the highlighted row.
-    pub menu_open: bool,
+    /// Open drop-down menu; `menu_hover` is the highlighted row.
+    pub menu: Option<MenuId>,
     pub menu_hover: Option<usize>,
     /// Mouse is over (or dragging) the line between the views.
     pub divider_active: bool,
+    /// Mouse is over (or dragging) the Explorer's right edge.
+    pub sidebar_edge_active: bool,
 }
 
 struct Builder<'a> {
@@ -118,8 +124,18 @@ pub fn build(
     let full = Rect::new(0.0, 0.0, layout.width, layout.height);
     b.rect(full, theme.bg);
 
+    if let Some(sb) = &layout.sidebar {
+        draw_explorer(&mut b, ed, layout, sb);
+        let color = if ui.sidebar_edge_active {
+            theme.accent
+        } else {
+            theme.border
+        };
+        b.rect(sb.edge_line, color);
+    }
     for pl in &layout.panes {
-        let focused = pl.pane == ed.focus;
+        // The Explorer can hold the keyboard focus instead of a view.
+        let focused = pl.pane == ed.focus && !ed.explorer.focused;
         draw_text_area(&mut b, ed, layout, pl, focused, cursor_on);
         draw_tab_bar(&mut b, ed, layout, pl, focused);
     }
@@ -131,11 +147,11 @@ pub fn build(
         };
         b.rect(line, color);
     }
-    draw_toolbar(&mut b, layout, ui);
+    draw_toolbar(&mut b, ed, layout, ui);
     let tooltip = ui
         .hover_button
-        .filter(|_| !ui.menu_open)
-        .and_then(|i| toolbar_buttons(layout).into_iter().nth(i))
+        .filter(|_| ui.menu.is_none())
+        .and_then(|i| toolbar_buttons(layout, ed).into_iter().nth(i))
         .map(|btn| match keymap::shortcut_for(btn.cmd) {
             Some(keys) => format!("{} ({keys})", btn.cmd.description()),
             None => btn.cmd.description(),
@@ -147,21 +163,24 @@ pub fn build(
     if let Some(pl) = &layout.picker {
         draw_picker(&mut b, ed, layout, pl, cursor_on);
     }
-    if ui.menu_open {
-        draw_file_menu(&mut b, layout, ui);
+    if let Some(fl) = &layout.find {
+        draw_find_panel(&mut b, ed, layout, fl, cursor_on);
+    }
+    if let Some(menu) = ui.menu {
+        draw_menu(&mut b, ed, layout, ui, menu);
     }
 
     FrameData { layers: b.layers }
 }
 
-fn draw_toolbar(b: &mut Builder, l: &Layout, ui: UiState) {
+fn draw_toolbar(b: &mut Builder, ed: &Editor, l: &Layout, ui: UiState) {
     let theme = b.theme;
     b.rect(l.toolbar, theme.toolbar_bg);
     let text_y = l.toolbar.y + (l.toolbar.h - l.line_h) / 2.0;
     let inset = (l.scale * 3.0).round();
-    for (i, btn) in toolbar_buttons(l).iter().enumerate() {
+    for (i, btn) in toolbar_buttons(l, ed).iter().enumerate() {
         let r = btn.rect;
-        let open_menu = ui.menu_open && btn.cmd == crate::commands::Command::FileMenu;
+        let open_menu = ui.menu.is_some() && MenuId::for_command(btn.cmd) == ui.menu;
         let pressed = ui.pressed_button == Some(i) || open_menu;
         let hovered = ui.hover_button == Some(i);
         let face = Rect::new(
@@ -194,9 +213,16 @@ fn draw_toolbar(b: &mut Builder, l: &Layout, ui: UiState) {
     );
 }
 
-fn draw_file_menu(b: &mut Builder, l: &Layout, ui: UiState) {
+fn draw_menu(b: &mut Builder, ed: &Editor, l: &Layout, ui: UiState, menu: MenuId) {
     let theme = b.theme;
-    let menu = file_menu_layout(l);
+    let Some(anchor) = toolbar_buttons(l, ed)
+        .into_iter()
+        .find(|btn| MenuId::for_command(btn.cmd) == Some(menu))
+        .map(|btn| btn.rect)
+    else {
+        return;
+    };
+    let menu = menu_layout(l, ed, menu, anchor);
     let panel = menu.panel;
     let border = l.scale.max(1.0).round();
     let sh = (l.cell_w * 0.6).round();
@@ -217,7 +243,8 @@ fn draw_file_menu(b: &mut Builder, l: &Layout, ui: UiState) {
     let pad = l.cell_w * 1.5;
     for (i, row) in menu.rows.iter().enumerate() {
         let r = row.rect;
-        if row.cmd.is_none() {
+        let entry = &row.entry;
+        if entry.cmd.is_none() {
             let y = (r.y + r.h / 2.0).round();
             b.rect(
                 Rect::new(r.x + l.cell_w, y, r.w - 2.0 * l.cell_w, 1.0),
@@ -226,7 +253,9 @@ fn draw_file_menu(b: &mut Builder, l: &Layout, ui: UiState) {
             continue;
         }
         let ty = r.y + (r.h - l.line_h) / 2.0;
-        let fg = if ui.menu_hover == Some(i) {
+        let fg = if !entry.enabled {
+            theme.gutter_fg
+        } else if ui.menu_hover == Some(i) {
             b.rect(r, theme.picker_selected);
             b.rect(
                 Rect::new(r.x, r.y, (2.0 * l.scale).round().max(2.0), r.h),
@@ -236,11 +265,135 @@ fn draw_file_menu(b: &mut Builder, l: &Layout, ui: UiState) {
         } else {
             theme.fg
         };
-        b.label(row.label, r.x + pad, ty, fg, panel);
+        // Toggles get a check box in front of the label.
+        let label = match entry.checked {
+            Some(true) => format!("☑ {}", entry.label),
+            Some(false) => format!("☐ {}", entry.label),
+            None => format!("  {}", entry.label),
+        };
+        b.label(label, r.x + pad, ty, fg, panel);
         if !row.keys.is_empty() {
             let kx = r.right() - pad - row.keys.width() as f32 * l.cell_w;
-            b.label(row.keys.clone(), kx, ty, theme.fg_dim, panel);
+            let kc = if entry.enabled {
+                theme.fg_dim
+            } else {
+                theme.gutter_fg
+            };
+            b.label(row.keys.clone(), kx, ty, kc, panel);
         }
+    }
+}
+
+fn draw_explorer(b: &mut Builder, ed: &Editor, l: &Layout, sb: &SidebarLayout) {
+    let theme = b.theme;
+    let ex = &ed.explorer;
+    b.rect(sb.area, theme.tabbar_bg);
+
+    // Header: workspace name, and a "+" button to add a folder.
+    b.rect(sb.header, theme.toolbar_bg);
+    let hy = sb.header.y + (sb.header.h - l.line_h) / 2.0;
+    let title = match &ed.workspace {
+        Some(ws) => format!("  {}", ws.name.to_uppercase()),
+        None => "  EXPLORER".to_string(),
+    };
+    let title_color = if ex.focused {
+        theme.tab_fg_active
+    } else {
+        theme.statusbar_fg
+    };
+    b.label(title, sb.header.x, hy, title_color, sb.header);
+    if let Some(btn) = sb.add_button {
+        let x = btn.x + (btn.w - l.cell_w) / 2.0;
+        b.label("+", x, hy, theme.accent, sb.header);
+    }
+    b.rect(
+        Rect::new(sb.header.x, sb.header.bottom() - 1.0, sb.header.w, 1.0),
+        theme.border,
+    );
+
+    // Empty states.
+    let hint = match &ed.workspace {
+        None => Some([
+            "No workspace open.",
+            "Workspace → New Workspace…",
+            "or Open Workspace…",
+        ]),
+        Some(ws) if ws.folders.is_empty() => Some([
+            "No folders yet.",
+            "Click here or use",
+            "Workspace → Add Folder…",
+        ]),
+        _ => None,
+    };
+    if let Some(lines) = hint {
+        let mut y = sb.list.y + l.line_h * 0.5;
+        for (i, line) in lines.iter().enumerate() {
+            let color = if i == 0 {
+                theme.statusbar_fg
+            } else {
+                theme.fg_dim
+            };
+            b.label(*line, sb.list.x + l.cell_w, y, color, sb.list);
+            y += l.line_h;
+        }
+        return;
+    }
+
+    // The active file of the focused view is highlighted in the tree.
+    let active_path = ed.pane().doc().and_then(|d| d.path.clone());
+    for (row_i, (i, row)) in ex
+        .rows
+        .iter()
+        .enumerate()
+        .skip(ex.scroll)
+        .take(sb.rows)
+        .enumerate()
+    {
+        let y = sb.list.y + row_i as f32 * l.line_h;
+        let line = Rect::new(sb.list.x, y, sb.list.w, l.line_h);
+        if i == ex.selected {
+            b.rect(line, theme.picker_selected);
+            if ex.focused {
+                b.rect(
+                    Rect::new(line.x, y, (2.0 * l.scale).round().max(2.0), l.line_h),
+                    theme.accent,
+                );
+            }
+        }
+        let indent = (1 + row.depth * 2) as f32 * l.cell_w;
+        let (marker, color) = if row.is_dir {
+            let arrow = if row.expanded { "▾ " } else { "▸ " };
+            let c = if row.is_root {
+                theme.tab_fg_active
+            } else {
+                theme.picker_dir
+            };
+            (arrow, c)
+        } else if active_path.as_ref() == Some(&row.path) {
+            ("  ", theme.tab_fg_active)
+        } else {
+            ("  ", theme.fg)
+        };
+        let name = if row.is_root {
+            row.name.to_uppercase()
+        } else {
+            row.name.clone()
+        };
+        b.label(
+            format!("{marker}{name}"),
+            sb.list.x + indent,
+            y,
+            color,
+            sb.list,
+        );
+    }
+
+    // Scrollbar.
+    if ex.rows.len() > sb.rows {
+        let w = (l.cell_w * 0.5).round();
+        let h = (sb.rows as f32 / ex.rows.len() as f32 * sb.list.h).max(l.line_h);
+        let y = sb.list.y + ex.scroll as f32 / ex.rows.len() as f32 * sb.list.h;
+        b.rect(Rect::new(sb.list.right() - w, y, w, h), theme.scrollbar);
     }
 }
 
@@ -249,32 +402,14 @@ fn draw_picker(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PickerLayout, curs
         return;
     };
     let theme = b.theme;
-    let panel = pl.panel;
-    let border = l.scale.max(1.0).round();
-
-    // Shadow, border, body.
-    let sh = (l.cell_w * 0.6).round();
-    b.rect(
-        Rect::new(panel.x + sh, panel.y + sh, panel.w, panel.h),
-        theme.shadow,
-    );
-    b.rect(
-        Rect::new(
-            panel.x - border,
-            panel.y - border,
-            panel.w + 2.0 * border,
-            panel.h + 2.0 * border,
-        ),
-        theme.overlay_border,
-    );
-    b.rect(panel, theme.overlay_bg);
+    draw_overlay_frame(b, l, pl.panel);
 
     // Title: current folder.
     b.rect(pl.title, theme.overlay_title_bg);
     let pad = l.cell_w;
     let ty = pl.title.y + (pl.title.h - l.line_h) / 2.0;
     let max_cols = ((pl.title.w - 2.0 * pad) / l.cell_w).max(0.0) as usize;
-    let title = format!("Open  {}", p.dir.display());
+    let title = p.title();
     b.label(
         truncate_left(&title, max_cols),
         pl.title.x + pad,
@@ -289,13 +424,7 @@ fn draw_picker(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PickerLayout, curs
     b.label(prompt, pl.filter.x + pad, fy, theme.prompt_fg, pl.filter);
     let fx = pl.filter.x + pad + prompt.width() as f32 * l.cell_w;
     if p.filter.is_empty() {
-        b.label(
-            "type to filter, Enter opens, Backspace goes up",
-            fx,
-            fy,
-            theme.fg_dim,
-            pl.filter,
-        );
+        b.label(p.hint(), fx, fy, theme.fg_dim, pl.filter);
     } else {
         b.label(p.filter.clone(), fx, fy, theme.fg, pl.filter);
     }
@@ -363,16 +492,275 @@ fn draw_picker(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PickerLayout, curs
     }
 }
 
+/// Shadow, border and body of an overlay panel.
+fn draw_overlay_frame(b: &mut Builder, l: &Layout, panel: Rect) {
+    let theme = b.theme;
+    let border = l.scale.max(1.0).round();
+    let sh = (l.cell_w * 0.6).round();
+    b.rect(
+        Rect::new(panel.x + sh, panel.y + sh, panel.w, panel.h),
+        theme.shadow,
+    );
+    b.rect(
+        Rect::new(
+            panel.x - border,
+            panel.y - border,
+            panel.w + 2.0 * border,
+            panel.h + 2.0 * border,
+        ),
+        theme.overlay_border,
+    );
+    b.rect(panel, theme.overlay_bg);
+}
+
+/// Search option chips (match case, whole word, regex), lit when on.
+fn draw_chips(b: &mut Builder, l: &Layout, rects: &[Rect; 3], opts: SearchOptions) {
+    let theme = b.theme;
+    let on = [opts.case_sensitive, opts.whole_word, opts.regex];
+    for ((r, label), on) in rects.iter().zip(CHIP_LABELS).zip(on) {
+        let (bg, fg) = if on {
+            (theme.accent, theme.accent_fg)
+        } else {
+            (theme.button_hover, theme.fg_dim)
+        };
+        b.rect(*r, bg);
+        let x = r.x + (r.w - label.width() as f32 * l.cell_w) / 2.0;
+        let y = r.y + (r.h - l.line_h) / 2.0;
+        b.label(label, x, y, fg, *r);
+    }
+}
+
+/// One input line of the find panel: label, text (or hint) and the cursor when active.
+#[allow(clippy::too_many_arguments)]
+fn draw_field(
+    b: &mut Builder,
+    l: &Layout,
+    r: Rect,
+    label: &str,
+    text: &str,
+    hint: &str,
+    active: bool,
+    cursor_on: bool,
+) {
+    let theme = b.theme;
+    let pad = l.cell_w;
+    let y = r.y + (r.h - l.line_h) / 2.0;
+    let label_w = 7.0 * l.cell_w;
+    b.label(
+        label,
+        r.x + pad,
+        y,
+        if active {
+            theme.prompt_fg
+        } else {
+            theme.fg_dim
+        },
+        r,
+    );
+    let x = r.x + pad + label_w;
+    let field = Rect::new(
+        x - pad * 0.5,
+        r.y + 2.0,
+        r.right() - x - pad * 0.5,
+        r.h - 4.0,
+    );
+    b.rect(field, if active { theme.bg } else { theme.overlay_bg });
+    if active {
+        b.rect(
+            Rect::new(field.x, field.bottom() - 1.0, field.w, 1.0),
+            theme.accent,
+        );
+    }
+    if text.is_empty() {
+        b.label(hint, x, y, theme.fg_dim, field);
+    } else {
+        b.label(text, x, y, theme.fg, field);
+    }
+    if active && cursor_on {
+        let cx = x + text.width() as f32 * l.cell_w;
+        b.rect(
+            Rect::new(cx, y, (2.0 * l.scale).round().max(2.0), l.line_h),
+            theme.cursor,
+        );
+    }
+}
+
+fn draw_find_panel(b: &mut Builder, ed: &Editor, l: &Layout, fl: &FindLayout, cursor_on: bool) {
+    let theme = b.theme;
+    let f = &ed.find;
+    draw_overlay_frame(b, l, fl.panel);
+    let pad = l.cell_w;
+
+    // Title with the scope, and the option chips.
+    b.rect(fl.title, theme.overlay_title_bg);
+    let ty = fl.title.y + (fl.title.h - l.line_h) / 2.0;
+    let title_clip = Rect::new(
+        fl.title.x,
+        fl.title.y,
+        (fl.chips[0].x - fl.title.x - pad).max(0.0),
+        fl.title.h,
+    );
+    b.label(
+        format!("Find in Files   in {}", f.scope),
+        fl.title.x + pad,
+        ty,
+        theme.tab_fg_active,
+        title_clip,
+    );
+    draw_chips(b, l, &fl.chips, ed.search_opts);
+
+    draw_field(
+        b,
+        l,
+        fl.query,
+        "Find:",
+        &f.query,
+        "text to search (Alt+C case, Alt+O word, Alt+R regex)",
+        f.field == Field::Query,
+        cursor_on,
+    );
+    draw_field(
+        b,
+        l,
+        fl.include,
+        "Files:",
+        &f.include,
+        "all files; e.g. *.js, .vue, src/**, !*.spec.js  (Tab)",
+        f.field == Field::Include,
+        cursor_on,
+    );
+    b.rect(
+        Rect::new(fl.include.x, fl.include.bottom() - 1.0, fl.include.w, 1.0),
+        theme.border,
+    );
+
+    // Results: file headers, then matching lines with the matches highlighted.
+    let digits = f
+        .rows
+        .iter()
+        .skip(f.scroll)
+        .take(fl.rows)
+        .filter_map(|r| match r {
+            Row::Hit(i, j) => Some(f.results[*i].hits[*j].line + 1),
+            Row::File(_) => None,
+        })
+        .max()
+        .unwrap_or(1)
+        .to_string()
+        .len()
+        .max(3);
+    for (row, (i, r)) in f
+        .rows
+        .iter()
+        .enumerate()
+        .skip(f.scroll)
+        .take(fl.rows)
+        .enumerate()
+    {
+        let y = fl.list.y + row as f32 * l.line_h;
+        if i == f.selected {
+            b.rect(
+                Rect::new(fl.list.x, y, fl.list.w, l.line_h),
+                theme.picker_selected,
+            );
+            b.rect(
+                Rect::new(fl.list.x, y, (2.0 * l.scale).round().max(2.0), l.line_h),
+                theme.accent,
+            );
+        }
+        match *r {
+            Row::File(fi) => {
+                let file = &f.results[fi];
+                let count = format!("({})", file.hits.len());
+                let cw = count.width() as f32 * l.cell_w;
+                let max_cols = ((fl.list.w - 4.0 * pad - cw) / l.cell_w).max(1.0) as usize;
+                b.label(
+                    truncate_left(&file.rel, max_cols),
+                    fl.list.x + pad,
+                    y,
+                    theme.picker_dir,
+                    fl.list,
+                );
+                b.label(
+                    count,
+                    fl.list.right() - 2.0 * pad - cw,
+                    y,
+                    theme.fg_dim,
+                    fl.list,
+                );
+            }
+            Row::Hit(fi, hi) => {
+                let hit = &f.results[fi].hits[hi];
+                let num = format!("{:>digits$}", hit.line + 1);
+                let x_num = fl.list.x + 3.0 * pad;
+                b.label(num, x_num, y, theme.gutter_fg, fl.list);
+                let x = x_num + (digits + 2) as f32 * l.cell_w;
+                let col_x = |c: usize| -> f32 {
+                    let before: String = hit.preview.chars().take(c).collect();
+                    x + before.width() as f32 * l.cell_w
+                };
+                for &(s, e) in &hit.preview_ranges {
+                    let (x0, x1) = (col_x(s), col_x(e).min(fl.list.right()));
+                    b.rect(Rect::new(x0, y, x1 - x0, l.line_h), theme.find_match);
+                }
+                b.label(hit.preview.clone(), x, y, theme.fg, fl.list);
+            }
+        }
+    }
+
+    // Scrollbar.
+    if f.rows.len() > fl.rows {
+        let w = (l.cell_w * 0.5).round();
+        let h = (fl.rows as f32 / f.rows.len() as f32 * fl.list.h).max(l.line_h);
+        let y = fl.list.y + f.scroll as f32 / f.rows.len() as f32 * fl.list.h;
+        b.rect(Rect::new(fl.list.right() - w, y, w, h), theme.scrollbar);
+    }
+
+    // Footer: progress / totals / error.
+    b.rect(
+        Rect::new(fl.footer.x, fl.footer.y, fl.footer.w, 1.0),
+        theme.border,
+    );
+    let fy = fl.footer.y + (fl.footer.h - l.line_h) / 2.0;
+    let color = if f.error.is_some() {
+        theme.error
+    } else {
+        theme.fg_dim
+    };
+    b.label(f.status(), fl.footer.x + pad, fy, color, fl.footer);
+    let keys = "Enter open · F8 next · Esc close";
+    let kw = keys.width() as f32 * l.cell_w;
+    if fl.footer.w > kw + 50.0 * l.cell_w {
+        b.label(
+            keys,
+            fl.footer.right() - pad - kw,
+            fy,
+            theme.fg_dim,
+            fl.footer,
+        );
+    }
+}
+
 /// Centered hint shown in a view with no open tabs.
 fn draw_empty_pane(b: &mut Builder, l: &Layout, pl: &PaneLayout) {
-    let lines = [
-        "No file open",
-        "",
-        "Ctrl+O   open a file",
-        "Ctrl+N   new file",
-        "F1       help",
-        "F2       keyboard shortcuts",
-    ];
+    let lines: &[&str] = if pl.pane == PANEL {
+        &[
+            "Panel",
+            "",
+            "F1         help",
+            "F2         keyboard shortcuts",
+            "Shift+F6   hide the panel",
+        ]
+    } else {
+        &[
+            "No file open",
+            "",
+            "Ctrl+O   open a file",
+            "Ctrl+P   quick open",
+            "Ctrl+N   new file",
+            "F1       help",
+        ]
+    };
     let w = lines.iter().map(|s| s.width()).max().unwrap_or(0) as f32 * l.cell_w;
     let x = (pl.area.x + (pl.area.w - w) / 2.0).max(pl.area.x + l.cell_w);
     let mut y = pl.text.y + (pl.text.h - lines.len() as f32 * l.line_h) / 3.0;
@@ -407,6 +795,8 @@ fn draw_text_area(
     let (top, left) = (doc.view.top_line, doc.view.left_col);
     let cursor_line = rope.char_to_line(doc.selection.head);
     let (sel_s, sel_e) = doc.selection.range();
+    // All selections in multi-cursor mode (just the primary one otherwise).
+    let sels = doc.all_selections();
     // Find highlights belong to the focused document only.
     let query = if focused { ed.active_query() } else { None };
     let body = Rect::new(pl.area.x, pl.text.y, pl.area.w, pl.text.h);
@@ -440,8 +830,8 @@ fn draw_text_area(
 
         if let Some(q) = &query {
             let text: std::borrow::Cow<str> = rope.slice(ls..le).into();
-            for m in q.matches_in(&text) {
-                let (s, e) = (ls + m, ls + m + q.len());
+            for (ms, me) in q.matches_in(&text) {
+                let (s, e) = (ls + ms, ls + me);
                 let x0 = col_x(s).max(pl.text.x);
                 let x1 = col_x(e).min(pl.text.right());
                 let color = if (s, e) == (sel_s, sel_e) {
@@ -453,19 +843,21 @@ fn draw_text_area(
             }
         }
 
-        // Selection, including one cell for a selected newline.
-        if sel_s < sel_e && sel_s <= le && sel_e > ls {
-            let s = sel_s.max(ls);
-            let e = sel_e.min(le);
-            let x0 = col_x(s).max(pl.text.x);
-            let mut x1 = col_x(e);
-            if sel_e > le && line + 1 < rope.len_lines() {
-                x1 += l.cell_w * 0.6;
+        // Selections, including one cell for a selected newline.
+        for (sel_s, sel_e) in sels.iter().map(|s| s.range()) {
+            if sel_s < sel_e && sel_s <= le && sel_e > ls {
+                let s = sel_s.max(ls);
+                let e = sel_e.min(le);
+                let x0 = col_x(s).max(pl.text.x);
+                let mut x1 = col_x(e);
+                if sel_e > le && line + 1 < rope.len_lines() {
+                    x1 += l.cell_w * 0.6;
+                }
+                b.rect(
+                    Rect::new(x0, y, (x1 - x0).min(pl.text.right() - x0), l.line_h),
+                    theme.selection,
+                );
             }
-            b.rect(
-                Rect::new(x0, y, (x1 - x0).min(pl.text.right() - x0), l.line_h),
-                theme.selection,
-            );
         }
 
         if ed.config.line_numbers {
@@ -483,11 +875,16 @@ fn draw_text_area(
             b.label(visible, pl.text.x, y, theme.fg, pl.text);
         }
 
-        if line == cursor_line && focused && cursor_on && ed.minibuffer.is_none() {
-            let x = col_x(doc.selection.head);
-            if x >= pl.text.x - 1.0 && x <= pl.text.right() {
-                let w = (2.0 * l.scale).round().max(2.0);
-                b.rect(Rect::new(x, y, w, l.line_h), theme.cursor);
+        if focused && cursor_on && ed.minibuffer.is_none() {
+            for s in &sels {
+                if rope.char_to_line(s.head) != line {
+                    continue;
+                }
+                let x = col_x(s.head);
+                if x >= pl.text.x - 1.0 && x <= pl.text.right() {
+                    let w = (2.0 * l.scale).round().max(2.0);
+                    b.rect(Rect::new(x, y, w, l.line_h), theme.cursor);
+                }
             }
         }
     }
@@ -548,8 +945,14 @@ fn draw_tab_bar(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PaneLayout, focus
 }
 
 pub fn mode_label(ed: &Editor) -> &'static str {
+    if ed.find.open {
+        return "SEARCH";
+    }
     if ed.picker.is_some() {
         return "PICK";
+    }
+    if ed.explorer.focused && ed.minibuffer.is_none() {
+        return "EXPL";
     }
     match ed.minibuffer.as_ref().map(|m| &m.kind) {
         None if ed.has_doc() && ed.doc().read_only => "VIEW",
@@ -558,7 +961,13 @@ pub fn mode_label(ed: &Editor) -> &'static str {
         Some(PromptKind::SaveAs(_)) => "SAVE",
         Some(PromptKind::Find { .. }) => "FIND",
         Some(PromptKind::GotoLine) => "GOTO",
-        Some(PromptKind::ConfirmClose { .. } | PromptKind::ConfirmQuit) => "CONFIRM",
+        Some(
+            PromptKind::ConfirmClose { .. }
+            | PromptKind::ConfirmDiscard(_)
+            | PromptKind::ConfirmSaveWorkspace(_)
+            | PromptKind::ConfirmRemoveFolder(_),
+        ) => "CONFIRM",
+        Some(PromptKind::WorkspaceName | PromptKind::SaveWorkspaceAs(_)) => "WORKSPACE",
     }
 }
 
@@ -582,7 +991,9 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
         let head = doc.selection.head;
         let line = doc.rope.char_to_line(head);
         let col = mv::col_of(&doc.rope, head, ed.config.tab_width);
-        if !doc.selection.is_empty() {
+        if !doc.extra.is_empty() {
+            right.push_str(&format!("{} cursors  ", doc.extra.len() + 1));
+        } else if !doc.selection.is_empty() {
             let (s, e) = doc.selection.range();
             right.push_str(&format!("({} selected)  ", e - s));
         }
@@ -599,7 +1010,16 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
     b.label(right, right_x, y, theme.statusbar_fg, r);
 
     // Left side: file path, cut from the left so the file name stays visible.
-    let mut x = chip_w + l.cell_w;
+    let mut x = chip_w;
+    // Workspace chip: shows which workspace is open.
+    if let Some(ws) = &ed.workspace {
+        let chip = format!(" ⧉ {} ", ws.name);
+        let w = chip.width() as f32 * l.cell_w;
+        b.rect(Rect::new(x, r.y, w, r.h), theme.minibuffer_bg);
+        b.label(chip, x, y, theme.tab_fg_active, r);
+        x += w;
+    }
+    x += l.cell_w;
     let avail_cols = ((right_x - x) / l.cell_w).max(0.0) as usize;
     let budget = if ed.message.is_some() {
         avail_cols / 2
@@ -656,6 +1076,9 @@ fn draw_minibuffer(b: &mut Builder, ed: &Editor, l: &Layout, cursor_on: bool) {
         let cx = ix + before.width() as f32 * l.cell_w;
         let w = (2.0 * l.scale).round().max(2.0);
         b.rect(Rect::new(cx, y, w, l.line_h), theme.cursor);
+    }
+    if matches!(mb.kind, PromptKind::Find { .. }) {
+        draw_chips(b, l, &chip_rects(r, l.cell_w, l.line_h), ed.search_opts);
     }
 }
 

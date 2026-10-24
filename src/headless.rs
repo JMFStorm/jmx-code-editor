@@ -20,6 +20,9 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Longest a `state`, `shot` or `wait` waits for background work.
+const JOB_TIMEOUT: Duration = Duration::from_secs(10);
+
 use anyhow::{Context, Result, anyhow, bail};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -52,6 +55,8 @@ pub enum ScriptCmd {
     Resize(u32, u32),
     Shot(PathBuf),
     State,
+    /// Wait for background work (Find in Files) to finish.
+    Wait,
     Sleep(u64),
     Quit,
 }
@@ -123,13 +128,14 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
     match cmd {
         ScriptCmd::Key(mods, key, text) => {
             session.modifiers = mods;
-            session.key(&key, text.as_deref());
+            session.key(&key, &key, text.as_deref());
             session.modifiers = ModifiersState::empty();
         }
         ScriptCmd::Type(text) => {
             for ch in text.chars() {
                 let s = ch.to_string();
-                session.key(&Key::Character(s.as_str().into()), Some(&s));
+                let key = Key::Character(s.as_str().into());
+                session.key(&key, &key, Some(&s));
             }
         }
         ScriptCmd::Move(x, y) => {
@@ -169,6 +175,7 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
             session.set_size(w, h, scale);
         }
         ScriptCmd::Shot(path) => {
+            session.editor.wait_jobs(JOB_TIMEOUT);
             if !session.draw(renderer, true) {
                 bail!("frame was not rendered");
             }
@@ -176,7 +183,11 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
             write_png(&path, w, h, &pixels)?;
             println!("shot {}", path.display());
         }
-        ScriptCmd::State => println!("{}", state_json(session)),
+        ScriptCmd::State => {
+            session.editor.wait_jobs(JOB_TIMEOUT);
+            println!("{}", state_json(session));
+        }
+        ScriptCmd::Wait => session.editor.wait_jobs(JOB_TIMEOUT),
         ScriptCmd::Sleep(ms) => {
             std::thread::sleep(Duration::from_millis(ms));
             session.editor.expire_message();
@@ -277,6 +288,7 @@ pub fn parse_line(line: &str) -> Result<Option<ScriptCmd>> {
             ScriptCmd::Shot(PathBuf::from(arg))
         }
         "state" => ScriptCmd::State,
+        "wait" => ScriptCmd::Wait,
         "sleep" => {
             need("milliseconds")?;
             ScriptCmd::Sleep(arg.parse()?)
@@ -416,6 +428,7 @@ pub fn state_json(session: &Session) -> String {
     let (mut path, mut dirty, mut read_only, mut line, mut col) = (None, None, None, None, None);
     let (mut selection, mut line_text, mut lines, mut indent, mut line_ending) =
         (None, None, None, None, None);
+    let mut cursors = None;
     if let Some(doc) = doc {
         let head = doc.selection.head;
         let l = doc.rope.char_to_line(head);
@@ -429,6 +442,7 @@ pub fn state_json(session: &Session) -> String {
         line = Some((l + 1).to_string());
         col = Some((mv::col_of(&doc.rope, head, ed.config.tab_width) + 1).to_string());
         selection = Some(format!("[{s},{e}]"));
+        cursors = Some((doc.extra.len() + 1).to_string());
         let text: String = doc.rope.line(l).chars().filter(|&c| c != '\n').collect();
         line_text = Some(json_str(&text));
         lines = Some(doc.rope.len_lines().to_string());
@@ -437,24 +451,76 @@ pub fn state_json(session: &Session) -> String {
     }
     let picker = ed.picker.as_ref().map(|p| {
         format!(
-            "{{\"dir\":{},\"filter\":{},\"selected\":{}}}",
+            "{{\"kind\":{},\"dir\":{},\"filter\":{},\"selected\":{},\"count\":{}}}",
+            json_str(&format!("{:?}", p.kind)),
             json_str(&p.dir.display().to_string()),
             json_str(&p.filter),
-            opt(p.selected_entry().map(|e| json_str(&e.name)))
+            opt(p.selected_entry().map(|e| json_str(&e.name))),
+            p.len()
         )
     });
+    let workspace = ed.workspace.as_ref().map(|w| {
+        let folders: Vec<String> = w
+            .folders
+            .iter()
+            .map(|f| json_str(&f.display().to_string()))
+            .collect();
+        format!(
+            "{{\"name\":{},\"folders\":[{}],\"file\":{},\"gitignore\":{}}}",
+            json_str(&w.name),
+            folders.join(","),
+            opt(w.file.as_ref().map(|f| json_str(&f.display().to_string()))),
+            w.respect_gitignore
+        )
+    });
+    let ex = &ed.explorer;
+    let rows: Vec<String> = ex
+        .rows
+        .iter()
+        .map(|r| json_str(&format!("{}{}", "  ".repeat(r.depth), r.name)))
+        .collect();
+    let explorer = format!(
+        "{{\"visible\":{},\"focused\":{},\"selected\":{},\"rows\":[{}]}}",
+        ex.visible,
+        ex.focused,
+        ex.selected,
+        rows.join(",")
+    );
+    let f = &ed.find;
+    let o = ed.search_opts;
+    let find = format!(
+        "{{\"open\":{},\"query\":{},\"include\":{},\"case\":{},\"word\":{},\"regex\":{},\
+\"files\":{},\"matches\":{},\"running\":{},\"error\":{},\"selected\":{}}}",
+        f.open,
+        json_str(&f.query),
+        json_str(&f.include),
+        o.case_sensitive,
+        o.whole_word,
+        o.regex,
+        f.results.len(),
+        f.match_count,
+        f.running(),
+        opt(f.error.as_ref().map(|e| json_str(e))),
+        opt(f.selected_hit().map(|(file, hit)| json_str(&format!(
+            "{}:{}",
+            file.rel,
+            hit.line + 1
+        )))),
+    );
+    let menu = session.open_menu_id().map(|m| json_str(&format!("{m:?}")));
     let prompt = ed.minibuffer.as_ref().map(|m| json_str(&m.input));
     let message = ed.message.as_ref().map(|m| json_str(&m.text));
     format!(
         "{{\"mode\":{},\"focus\":{},\"split\":{},\"split_ratio\":{:.3},\"menu\":{},\
 \"active\":{},\"tabs\":[{}],\"panes\":[{}],\"path\":{},\"dirty\":{},\"read_only\":{},\
-\"line\":{},\"col\":{},\"selection\":{},\"line_text\":{},\"lines\":{},\"indent\":{},\
-\"line_ending\":{},\"picker\":{},\"prompt\":{},\"message\":{},\"font_size\":{}}}",
+\"line\":{},\"col\":{},\"selection\":{},\"cursors\":{},\"line_text\":{},\"lines\":{},\"indent\":{},\
+\"line_ending\":{},\"picker\":{},\"prompt\":{},\"message\":{},\"font_size\":{},\
+\"workspace\":{},\"explorer\":{explorer},\"find\":{find}}}",
         json_str(frame::mode_label(ed)),
         ed.focus,
         ed.split,
         ed.split_ratio,
-        session.menu_open(),
+        opt(menu),
         ed.pane().active,
         tabs_of(ed.focus),
         panes.join(","),
@@ -464,6 +530,7 @@ pub fn state_json(session: &Session) -> String {
         opt(line),
         opt(col),
         opt(selection),
+        opt(cursors),
         opt(line_text),
         opt(lines),
         opt(indent),
@@ -472,6 +539,7 @@ pub fn state_json(session: &Session) -> String {
         opt(prompt),
         opt(message),
         ed.config.font_size,
+        opt(workspace),
     )
 }
 

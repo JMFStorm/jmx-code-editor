@@ -58,6 +58,9 @@ pub struct Document {
     /// File was not valid UTF-8 and was decoded lossily.
     pub lossy: bool,
     pub selection: Selection,
+    /// Further selections in multi-cursor mode, in the order they were added. `selection` is
+    /// the primary one (the newest), which the view follows.
+    pub extra: Vec<Selection>,
     /// Display column that up/down movement tries to keep.
     pub goal_col: Option<usize>,
     pub history: History,
@@ -82,6 +85,7 @@ impl Document {
             bom: false,
             lossy: false,
             selection: Selection::default(),
+            extra: Vec::new(),
             goal_col: None,
             history: History::default(),
             view: View::default(),
@@ -248,7 +252,98 @@ impl Document {
         self.transact(kind, vec![(s, e, text.to_string())], after);
     }
 
+    /// Put back unsaved text kept in a workspace file, as one undo step so that undo returns
+    /// to the version on disk. The document shows as modified.
+    pub fn restore_unsaved(&mut self, text: &str) {
+        if self.read_only || self.rope == *text {
+            return;
+        }
+        let len = self.rope.len_chars();
+        self.transact(
+            EditKind::Other,
+            vec![(0, len, text.to_string())],
+            Selection::point(0),
+        );
+        self.history.break_coalescing();
+    }
+
+    /// Reload the text from disk, discarding unsaved changes as one undo step (so undo brings
+    /// them back). Returns false if the text already matches the file.
+    pub fn revert(&mut self, tab_width: usize) -> Result<bool> {
+        let Some(path) = self.path.clone() else {
+            anyhow::bail!("{} has not been saved yet", self.title());
+        };
+        if self.read_only {
+            anyhow::bail!("{} is read-only", self.title());
+        }
+        let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let disk = Self::from_bytes(&bytes, tab_width);
+        self.line_ending = disk.line_ending;
+        self.indent = disk.indent;
+        self.bom = disk.bom;
+        self.lossy = disk.lossy;
+        let text = disk.rope.to_string();
+        if self.rope == *text.as_str() {
+            self.history.mark_saved();
+            return Ok(false);
+        }
+        let len = self.rope.len_chars();
+        let head = self.selection.head.min(text.chars().count());
+        self.transact(
+            EditKind::Other,
+            vec![(0, len, text)],
+            Selection::point(head),
+        );
+        self.history.break_coalescing();
+        self.history.mark_saved();
+        Ok(true)
+    }
+
+    /// Every selection (primary included), sorted by position.
+    pub fn all_selections(&self) -> Vec<Selection> {
+        let mut all = self.extra.to_vec();
+        all.push(self.selection);
+        all.sort_by_key(|s| s.range());
+        all
+    }
+
+    /// Back to a single cursor (the primary selection).
+    pub fn collapse_extra(&mut self) {
+        self.extra.clear();
+    }
+
+    /// Merge selections that overlap or touch, keeping the primary one primary.
+    pub fn merge_selections(&mut self) {
+        if self.extra.is_empty() {
+            return;
+        }
+        let primary = self.selection;
+        let mut merged: Vec<(Selection, bool)> = Vec::new();
+        for s in self.all_selections() {
+            let is_primary = s == primary;
+            match merged.last_mut() {
+                Some((last, p)) if overlaps(*last, s) => {
+                    let (ls, le) = last.range();
+                    let (ss, se) = s.range();
+                    let (start, end) = (ls.min(ss), le.max(se));
+                    // Keep the direction of the selection the cursor belongs to.
+                    *last = if s.head < s.anchor {
+                        Selection::new(end, start)
+                    } else {
+                        Selection::new(start, end)
+                    };
+                    *p |= is_primary;
+                }
+                _ => merged.push((s, is_primary)),
+            }
+        }
+        let i = merged.iter().position(|m| m.1).unwrap_or(merged.len() - 1);
+        self.selection = merged.remove(i).0;
+        self.extra = merged.into_iter().map(|m| m.0).collect();
+    }
+
     pub fn undo(&mut self) -> bool {
+        self.extra.clear();
         let Some(t) = self.history.pop_undo() else {
             return false;
         };
@@ -263,6 +358,7 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> bool {
+        self.extra.clear();
         let Some(t) = self.history.pop_redo() else {
             return false;
         };
@@ -308,6 +404,13 @@ impl Document {
 }
 
 /// Guess indentation style (tabs vs. spaces, and the space width) from the first lines.
+/// For `a` starting at or before `b`: they share text, or start at the same place.
+fn overlaps(a: Selection, b: Selection) -> bool {
+    let (a0, a1) = a.range();
+    let (b0, _) = b.range();
+    b0 < a1 || a0 == b0
+}
+
 fn detect_indent(text: &str, tab_width: usize) -> Indent {
     let mut tabs = 0;
     let mut spaces = 0;
@@ -444,6 +547,30 @@ mod tests {
         assert!(!doc.is_dirty());
         doc.undo();
         assert!(doc.is_dirty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn revert_discards_changes_as_one_undo_step() {
+        let dir = std::env::temp_dir().join(format!("jmx-revert-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.txt");
+        fs::write(&path, "one\r\ntwo\r\n").unwrap();
+        let mut doc = Document::open(&path, 4).unwrap();
+        doc.selection = Selection::point(3);
+        doc.replace_selection("!!", EditKind::Insert);
+        doc.selection = Selection::point(0);
+        doc.replace_selection("zero ", EditKind::Other);
+        assert!(doc.is_dirty());
+        assert!(doc.revert(4).unwrap());
+        assert_eq!(doc.rope.to_string(), "one\ntwo\n");
+        assert!(!doc.is_dirty());
+        assert!(!doc.revert(4).unwrap()); // nothing left to revert
+        doc.undo();
+        assert_eq!(doc.rope.to_string(), "zero one!!\ntwo\n");
+        assert!(doc.is_dirty());
+        let mut untitled = Document::new_empty(None, 4);
+        assert!(untitled.revert(4).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

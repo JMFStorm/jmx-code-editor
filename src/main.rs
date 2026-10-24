@@ -13,6 +13,7 @@ mod render;
 mod session;
 mod theme;
 mod ui;
+mod workspace;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -37,7 +38,7 @@ Options:
 Headless script commands:
   key ctrl+shift+k | type TEXT | move X,Y | click X,Y | dclick X,Y
   press X,Y | release X,Y | wheel DY [X,Y] | resize WxH | shot FILE.png
-  state | sleep MS | quit";
+  state | wait | sleep MS | quit";
 
 struct Args {
     paths: Vec<PathBuf>,

@@ -1,6 +1,8 @@
 pub mod document;
+mod find_files;
 pub mod history;
 pub mod movement;
+mod multi;
 pub mod search;
 pub mod selection;
 pub mod view;
@@ -11,12 +13,15 @@ use std::time::{Duration, Instant};
 use crate::commands::{Command, Motion};
 use crate::config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use crate::help;
-use crate::ui::minibuffer::{AfterSave, Minibuffer, PromptKind, expand_tilde};
-use crate::ui::picker::{FilePicker, PickResult};
+use crate::ui::explorer::{Explorer, ExplorerAction};
+use crate::ui::find_panel::FindPanel;
+use crate::ui::minibuffer::{AfterSave, Minibuffer, PendingAction, PromptKind, expand_tilde};
+use crate::ui::picker::{FilePicker, PickResult, PickerKind};
+use crate::workspace::{self as ws_file, Workspace};
 use document::{Document, Indent};
 use history::EditKind;
 use movement as mv;
-use search::Query;
+use search::{Query, SearchOptions};
 use selection::Selection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,8 +49,8 @@ pub struct Pane {
     pub cols: usize,
 }
 
-impl Pane {
-    fn new() -> Self {
+impl Default for Pane {
+    fn default() -> Self {
         Self {
             docs: Vec::new(),
             active: 0,
@@ -53,12 +58,19 @@ impl Pane {
             cols: 80,
         }
     }
+}
 
+impl Pane {
     /// The active document, if the view has any tabs.
     pub fn doc(&self) -> Option<&Document> {
         self.docs.get(self.active)
     }
 }
+
+/// The left view: files and editing.
+pub const EDITOR: usize = 0;
+/// The right view: internal pages only (help, shortcuts; later problems and settings).
+pub const PANEL: usize = 1;
 
 pub const MIN_SPLIT: f32 = 0.15;
 pub const MAX_SPLIT: f32 = 0.85;
@@ -72,6 +84,9 @@ pub struct Editor {
     pub split: bool,
     /// Left view's share of the width.
     pub split_ratio: f32,
+    /// Open workspace (workspace mode); `None` is file mode.
+    pub workspace: Option<Workspace>,
+    pub explorer: Explorer,
     pub config: Config,
     pub minibuffer: Option<Minibuffer>,
     pub picker: Option<FilePicker>,
@@ -79,6 +94,10 @@ pub struct Editor {
     pub picker_rows: usize,
     pub message: Option<Message>,
     pub find_query: String,
+    /// Search toggles shared by Find and Find in Files.
+    pub search_opts: SearchOptions,
+    /// Find in Files panel; kept when closed so the results can be reopened and stepped.
+    pub find: FindPanel,
     pub should_quit: bool,
     clipboard: Option<arboard::Clipboard>,
     /// Fallback when the system clipboard is unavailable.
@@ -93,23 +112,30 @@ impl Editor {
             .map_err(|e| log::warn!("system clipboard unavailable: {e}"))
             .ok();
         let mut ed = Self {
-            panes: [Pane::new(), Pane::new()],
+            panes: [Pane::default(), Pane::default()],
             focus: 0,
             split: true,
             split_ratio: 0.5,
+            workspace: None,
+            explorer: Explorer::default(),
             config,
             minibuffer: None,
             picker: None,
             picker_rows: 10,
             message: None,
             find_query: String::new(),
+            search_opts: SearchOptions::default(),
+            find: FindPanel::default(),
             should_quit: false,
             clipboard,
             internal_clip: String::new(),
             line_clip: None,
         };
+        // A workspace file on the command line opens that workspace; other files open in it.
+        let (workspaces, files): (Vec<&PathBuf>, Vec<&PathBuf>) =
+            paths.iter().partition(|p| ws_file::is_workspace_file(p));
         // Files go to the left view, Help to the right; the cursor starts on the left.
-        for p in paths {
+        for p in &files {
             ed.open_path(p);
         }
         if ed.panes[0].docs.is_empty() {
@@ -121,6 +147,13 @@ impl Editor {
             .docs
             .push(Document::new_virtual(help::HELP_TITLE, &help::help_text()));
         ed.focus = 0;
+        if let Some(file) = workspaces.first() {
+            ed.open_workspace_now(file);
+            // Files given next to the workspace open in it.
+            for p in &files {
+                ed.open_path(p);
+            }
+        }
         ed
     }
 
@@ -206,6 +239,10 @@ impl Editor {
 
     /// Typed text (already filtered of shortcuts by the app).
     pub fn insert_text(&mut self, text: &str) {
+        if self.find.open {
+            self.find_panel_type(text);
+            return;
+        }
         if let Some(p) = &mut self.picker {
             p.type_text(text);
             return;
@@ -221,11 +258,24 @@ impl Editor {
             self.prompt_changed();
             return;
         }
+        if self.explorer.focused {
+            // Space opens/toggles, letters jump to the next matching entry.
+            match text.chars().next() {
+                Some(' ') => self.explorer_activate(),
+                Some(c) if !c.is_control() => self.explorer.jump_to_letter(c),
+                _ => {}
+            }
+            return;
+        }
         if text.chars().any(|c| c.is_control() && c != '\t') || !self.has_doc() {
             return;
         }
         if self.doc().read_only {
             self.warn("Read-only");
+            return;
+        }
+        if self.multi_cursor() {
+            self.multi_insert(text);
             return;
         }
         self.doc_mut().replace_selection(text, EditKind::Insert);
@@ -234,10 +284,16 @@ impl Editor {
 
     pub fn execute(&mut self, cmd: Command) {
         log::trace!("command {cmd:?}");
+        if self.find.open && self.find_command(cmd) {
+            return;
+        }
         if self.picker.is_some() && self.picker_command(cmd) {
             return;
         }
         if self.minibuffer.is_some() && self.prompt_command(cmd) {
+            return;
+        }
+        if self.explorer.focused && self.explorer_command(cmd) {
             return;
         }
         use Command::*;
@@ -249,6 +305,17 @@ impl Editor {
             return;
         }
         let keep_scroll = matches!(cmd, ScrollUp | ScrollDown | ZoomIn | ZoomOut | ZoomReset);
+        if self.multi_cursor() {
+            if cmd == Cancel {
+                self.doc_mut().collapse_extra();
+                return;
+            }
+            if !Self::multi_aware(cmd) {
+                self.doc_mut().collapse_extra();
+            } else if self.multi_edit(cmd) {
+                return;
+            }
+        }
         match cmd {
             Move(m, extend) => self.move_cursor(m, extend),
             SelectAll => {
@@ -258,6 +325,9 @@ impl Editor {
                 doc.history.break_coalescing();
             }
             SelectLine => self.select_line(),
+            AddNextOccurrence => self.add_next_occurrence(),
+            RemoveLastOccurrence => self.remove_last_occurrence(),
+            SelectAllOccurrences => self.select_all_occurrences(),
             Cancel => {
                 self.message = None;
                 let doc = self.doc_mut();
@@ -289,6 +359,7 @@ impl Editor {
             }
             NewFile => {
                 let doc = Document::new_empty(None, self.config.tab_width);
+                self.focus_view(EDITOR);
                 let pane = self.pane_mut();
                 pane.docs.push(doc);
                 pane.active = pane.docs.len() - 1;
@@ -303,6 +374,18 @@ impl Editor {
             }
             Save => self.save(AfterSave::Nothing),
             SaveAs => self.prompt_save_as(AfterSave::Nothing),
+            RevertFile => {
+                let tab = self.config.tab_width;
+                let title = self.doc().title();
+                match self.doc_mut().revert(tab) {
+                    Ok(true) => {
+                        log::info!("reverted {title}");
+                        self.info(format!("Reverted {title} (Ctrl+Z brings the changes back)"));
+                    }
+                    Ok(false) => self.info("No changes to revert"),
+                    Err(e) => self.error(format!("{e:#}")),
+                }
+            }
             CloseFile => {
                 let (pane, index) = (self.focus, self.pane().active);
                 if self.doc().is_dirty() {
@@ -334,6 +417,10 @@ impl Editor {
             GotoLine => {
                 self.minibuffer = Some(Minibuffer::new(PromptKind::GotoLine, String::new()));
             }
+            FindInFiles => self.toggle_find_in_files(),
+            NextResult => self.step_result(true),
+            PrevResult => self.step_result(false),
+            ToggleCase | ToggleWholeWord | ToggleRegex => self.toggle_search_option(cmd),
             ScrollUp => self.scroll(-1),
             ScrollDown => self.scroll(1),
             ZoomIn => self.zoom(self.config.font_size + 1.0),
@@ -346,11 +433,81 @@ impl Editor {
             FocusRight => self.focus_view(1),
             ToggleSplit => {
                 self.split = !self.split;
-                self.info(if self.split { "Two views" } else { "One view" });
+                if !self.split {
+                    self.focus_view(EDITOR);
+                }
+                self.info(if self.split {
+                    "Panel shown"
+                } else {
+                    "Panel hidden"
+                });
             }
             ResetSplit => self.split_ratio = 0.5,
             // Menus belong to the session (UI state); nothing to do here.
-            FileMenu => {}
+            FileMenu | WorkspaceMenu | SelectionMenu => {}
+            QuickOpen => self.quick_open(),
+            ToggleExplorer => {
+                self.explorer.visible = !self.explorer.visible;
+                if self.explorer.visible {
+                    self.explorer.rebuild(self.workspace.as_ref());
+                } else {
+                    self.explorer.focused = false;
+                }
+            }
+            FocusExplorer => {
+                self.explorer.visible = true;
+                self.explorer.focused = true;
+                self.minibuffer = None;
+                self.explorer.rebuild(self.workspace.as_ref());
+            }
+            NewWorkspace => {
+                self.minibuffer = Some(Minibuffer::new(PromptKind::WorkspaceName, String::new()));
+            }
+            OpenWorkspace => {
+                let start = self
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| w.file.as_ref())
+                    .and_then(|f| f.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| PathBuf::from(self.dir_hint()));
+                self.minibuffer = None;
+                self.picker = Some(FilePicker::browse(PickerKind::OpenWorkspace, start));
+            }
+            SaveWorkspace => self.save_workspace(),
+            SaveWorkspaceAs => self.prompt_save_workspace_as(None),
+            AddFolder => {
+                if self.workspace.is_none() {
+                    self.info("Create or open a workspace first (Workspace menu)");
+                } else {
+                    self.minibuffer = None;
+                    let start = PathBuf::from(self.dir_hint());
+                    self.picker = Some(FilePicker::browse(PickerKind::ChooseFolder, start));
+                }
+            }
+            RemoveFolder => match &self.workspace {
+                Some(ws) if !ws.folders.is_empty() => {
+                    self.minibuffer = None;
+                    self.picker = Some(FilePicker::remove_folder(&ws.folders));
+                }
+                _ => self.info("The workspace has no folders"),
+            },
+            ToggleGitignore => {
+                if let Some(ws) = &mut self.workspace {
+                    ws.respect_gitignore = !ws.respect_gitignore;
+                    let on = ws.respect_gitignore;
+                    self.explorer.rebuild(self.workspace.as_ref());
+                    self.info(if on {
+                        "Respecting .gitignore"
+                    } else {
+                        "Showing ignored files"
+                    });
+                }
+            }
+            CloseWorkspace => {
+                if self.workspace.is_some() {
+                    self.leave_current(PendingAction::CloseWorkspace);
+                }
+            }
             Quit => self.quit(),
         }
         if !keep_scroll {
@@ -359,6 +516,10 @@ impl Editor {
     }
 
     pub fn focus_view(&mut self, pane: usize) {
+        // Going to the panel shows it.
+        if pane == PANEL {
+            self.split = true;
+        }
         if pane != self.focus {
             log::debug!("focus view {pane}");
             self.focus = pane;
@@ -407,7 +568,14 @@ impl Editor {
             return false;
         };
         match cmd {
-            Cancel | OpenFile => {
+            Cancel => {
+                self.picker = None;
+                return true;
+            }
+            // Pressing the picker's own key again closes it.
+            OpenFile | QuickOpen | OpenWorkspace | AddFolder | RemoveFolder
+                if Some(p.kind) == picker_kind_for(cmd) =>
+            {
                 self.picker = None;
                 return true;
             }
@@ -431,8 +599,11 @@ impl Editor {
             }
             ZoomIn | ZoomOut | ZoomReset => return false,
             // Anything that leaves the picker (new file, help, quit, ...) closes it first.
-            NewFile | OpenPath | Help | ShowShortcuts | Quit | CloseFile | NextTab | PrevTab
-            | GotoTab(_) | FocusOtherView | FocusLeft | FocusRight | ToggleSplit => {
+            NewFile | OpenFile | OpenPath | Help | ShowShortcuts | Quit | CloseFile | NextTab
+            | PrevTab | GotoTab(_) | FocusOtherView | FocusLeft | FocusRight | ToggleSplit
+            | QuickOpen | ToggleExplorer | FocusExplorer | NewWorkspace | OpenWorkspace
+            | SaveWorkspace | SaveWorkspaceAs | AddFolder | RemoveFolder | ToggleGitignore
+            | CloseWorkspace | FindInFiles | NextResult | PrevResult => {
                 self.picker = None;
                 return false;
             }
@@ -454,6 +625,26 @@ impl Editor {
                 self.picker = None;
                 self.open_path(&path);
                 self.ensure_cursor_visible();
+            }
+            PickResult::OpenAt(path, line, col) => {
+                log::debug!("picker open {}:{line}", path.display());
+                self.picker = None;
+                self.open_path(&path);
+                if self.has_doc() && self.doc().path.is_some() {
+                    self.goto_line_col(line, col.unwrap_or(1));
+                }
+            }
+            PickResult::OpenWorkspace(path) => {
+                self.picker = None;
+                self.leave_current(PendingAction::OpenWorkspace(path));
+            }
+            PickResult::AddFolder(path) => {
+                self.picker = None;
+                self.add_folder(&path);
+            }
+            PickResult::RemoveFolder(path) => {
+                self.picker = None;
+                self.remove_folder(&path);
             }
             PickResult::None => {
                 log::debug!("picker in {}", p.dir.display());
@@ -524,6 +715,7 @@ impl Editor {
 
     pub fn click(&mut self, pos: usize, extend: bool, count: u32) {
         let doc = self.doc_mut();
+        doc.collapse_extra();
         match count {
             2 => {
                 let (s, e) = mv::word_at(&doc.rope, pos);
@@ -558,57 +750,32 @@ impl Editor {
         let tab = self.config.tab_width;
         let page = self.pane().rows.saturating_sub(1).max(1);
         let doc = self.doc_mut();
-        let rope = &doc.rope;
-        let sel = doc.selection;
-        let head = sel.head;
-        let (s, e) = sel.range();
-        let collapse = !extend && !sel.is_empty();
-
-        let vertical = |doc: &Document, lines: isize| -> (usize, usize) {
-            let rope = &doc.rope;
-            let line = rope.char_to_line(head) as isize;
-            let goal = doc.goal_col.unwrap_or_else(|| mv::col_of(rope, head, tab));
-            let target = line + lines;
-            let pos = if target < 0 {
-                0
-            } else if target >= rope.len_lines() as isize {
-                rope.len_chars()
+        if matches!(m, Motion::PageUp | Motion::PageDown) {
+            let lines = if m == Motion::PageUp {
+                -(page as isize)
             } else {
-                mv::pos_at_col(rope, target as usize, goal, tab)
+                page as isize
             };
-            (pos, goal)
-        };
-
-        let mut goal = None;
-        let pos = match m {
-            Motion::Left if collapse => s,
-            Motion::Right if collapse => e,
-            Motion::Left => mv::prev_grapheme(rope, head),
-            Motion::Right => mv::next_grapheme(rope, head),
-            Motion::WordLeft => mv::prev_word_start(rope, head),
-            Motion::WordRight => mv::next_word_end(rope, head),
-            Motion::Home => mv::smart_home(rope, head),
-            Motion::End => mv::line_content_end(rope, rope.char_to_line(head)),
-            Motion::DocStart => 0,
-            Motion::DocEnd => rope.len_chars(),
-            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
-                let lines = match m {
-                    Motion::Up => -1,
-                    Motion::Down => 1,
-                    Motion::PageUp => -(page as isize),
-                    _ => page as isize,
-                };
-                if matches!(m, Motion::PageUp | Motion::PageDown) {
-                    let total = doc.rope.len_lines();
-                    doc.view.scroll_lines(lines, total);
-                }
-                let (pos, g) = vertical(doc, lines);
-                goal = Some(g);
-                pos
-            }
-        };
+            let total = doc.rope.len_lines();
+            doc.view.scroll_lines(lines, total);
+        }
+        let (pos, goal) =
+            motion_target(&doc.rope, doc.selection, doc.goal_col, m, extend, tab, page);
+        // Other cursors move the same way, each keeping its own column.
+        let extra: Vec<Selection> = doc
+            .extra
+            .iter()
+            .map(|&s| {
+                let (p, _) = motion_target(&doc.rope, s, None, m, extend, tab, page);
+                s.moved_to(p, extend)
+            })
+            .collect();
         doc.move_to(pos, extend);
         doc.goal_col = goal;
+        if !extra.is_empty() {
+            doc.extra = extra;
+            doc.merge_selections();
+        }
     }
 
     fn select_line(&mut self) {
@@ -934,13 +1101,16 @@ impl Editor {
     // ---------------------------------------------------------------- files
 
     /// Folder to start Open/Save As in: the focused file's folder, else the other view's file's
-    /// folder (e.g. when the cursor is in Help), else the working directory.
+    /// folder (e.g. when the cursor is in Help), else the first workspace folder, else the
+    /// working directory.
     fn dir_hint(&self) -> String {
         let file_of = |p: usize| self.panes[p].doc().and_then(|d| d.path.as_ref());
+        let first_folder = self.workspace.as_ref().and_then(|w| w.folders.first());
         let dir = file_of(self.focus)
             .or_else(|| file_of(1 - self.focus))
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .filter(|p| !p.as_os_str().is_empty())
+            .or_else(|| first_folder.cloned())
             .or_else(|| std::env::current_dir().ok());
         match dir {
             Some(d) => {
@@ -982,6 +1152,8 @@ impl Editor {
                 );
                 let exists = path.exists();
                 let lossy = doc.lossy;
+                // Files always open in the editor view.
+                self.focus_view(EDITOR);
                 // Replace a pristine untitled tab instead of keeping it around.
                 let pane = self.pane_mut();
                 let reuse = pane.docs.len() == 1
@@ -1048,7 +1220,7 @@ impl Editor {
         match after {
             AfterSave::Nothing => {}
             AfterSave::CloseDoc => self.close_doc(self.focus, self.pane().active),
-            AfterSave::ContinueQuit => self.continue_quit(),
+            AfterSave::Continue(action) => self.save_all_then(action),
         }
     }
 
@@ -1071,15 +1243,53 @@ impl Editor {
     }
 
     fn quit(&mut self) {
+        self.leave_current(PendingAction::Quit);
+    }
+
+    /// Deal with unsaved work before `action` replaces or discards the open tabs:
+    /// - a workspace with a file is saved automatically (it keeps unsaved edits),
+    /// - a workspace never saved asks whether to save it,
+    /// - in file mode, unsaved files ask save all / discard / cancel.
+    fn leave_current(&mut self, action: PendingAction) {
+        if let Some(ws) = &self.workspace {
+            if ws.file.is_some() {
+                match self.write_workspace() {
+                    Ok(()) => self.continue_pending(action),
+                    Err(e) => self.error(format!("Workspace not saved: {e:#}")),
+                }
+            } else {
+                self.minibuffer = Some(Minibuffer::new(
+                    PromptKind::ConfirmSaveWorkspace(action),
+                    String::new(),
+                ));
+            }
+            return;
+        }
+        self.check_unsaved_then(action);
+    }
+
+    fn check_unsaved_then(&mut self, action: PendingAction) {
         if self.all_docs().any(Document::is_dirty) {
-            self.minibuffer = Some(Minibuffer::new(PromptKind::ConfirmQuit, String::new()));
+            self.minibuffer = Some(Minibuffer::new(
+                PromptKind::ConfirmDiscard(action),
+                String::new(),
+            ));
         } else {
-            self.should_quit = true;
+            self.continue_pending(action);
         }
     }
 
-    /// Save every dirty document; untitled ones get a Save As prompt that resumes quitting.
-    fn continue_quit(&mut self) {
+    fn continue_pending(&mut self, action: PendingAction) {
+        match action {
+            PendingAction::Quit => self.should_quit = true,
+            PendingAction::OpenWorkspace(path) => self.open_workspace_now(&path),
+            PendingAction::CloseWorkspace => self.finish_close_workspace(),
+        }
+    }
+
+    /// Save every dirty document, then run `action`. Untitled ones get a Save As prompt that
+    /// resumes afterwards.
+    fn save_all_then(&mut self, action: PendingAction) {
         for p in 0..self.panes.len() {
             for i in 0..self.panes[p].docs.len() {
                 if !self.panes[p].docs[i].is_dirty() {
@@ -1087,17 +1297,273 @@ impl Editor {
                 }
                 self.show_doc(p, i);
                 if self.doc().path.is_none() {
-                    self.prompt_save_as(AfterSave::ContinueQuit);
+                    self.prompt_save_as(AfterSave::Continue(action));
                     return;
                 }
                 if let Err(e) = self.doc_mut().save() {
-                    log::error!("save before quit failed: {e:#}");
+                    log::error!("save failed: {e:#}");
                     self.error(format!("{e:#}"));
                     return;
                 }
             }
         }
-        self.should_quit = true;
+        self.continue_pending(action);
+    }
+
+    // ---------------------------------------------------------------- workspace
+
+    fn new_workspace(&mut self, name: &str) {
+        if name.trim().is_empty() {
+            return;
+        }
+        if let Err(e) = self.write_workspace() {
+            self.error(format!("Previous workspace not saved: {e:#}"));
+            return;
+        }
+        let ws = Workspace::new(name);
+        log::info!("new workspace {}", ws.name);
+        self.info(format!(
+            "Workspace \"{}\" created. Add a folder: Workspace → Add Folder…",
+            ws.name
+        ));
+        self.workspace = Some(ws);
+        self.explorer = Explorer {
+            visible: true,
+            ..Explorer::default()
+        };
+        self.explorer.rebuild(self.workspace.as_ref());
+    }
+
+    fn add_folder(&mut self, path: &Path) {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let Some(ws) = &mut self.workspace else {
+            return;
+        };
+        if let Some(f) = ws
+            .folders
+            .iter()
+            .find(|f| path.starts_with(f) || f.starts_with(&path))
+        {
+            let msg = if *f == path {
+                format!("{} is already in the workspace", path.display())
+            } else {
+                format!("{} overlaps {}", path.display(), f.display())
+            };
+            self.warn(msg);
+            return;
+        }
+        ws.folders.push(path.clone());
+        log::info!("workspace {}: added folder {}", ws.name, path.display());
+        self.explorer.expanded.insert(path.clone());
+        self.explorer.visible = true;
+        self.explorer.rebuild(self.workspace.as_ref());
+        self.info(format!("Added {}", path.display()));
+    }
+
+    fn remove_folder(&mut self, path: &Path) {
+        let Some(ws) = &mut self.workspace else {
+            return;
+        };
+        let before = ws.folders.len();
+        ws.folders.retain(|f| f != path);
+        if ws.folders.len() == before {
+            return;
+        }
+        log::info!("workspace {}: removed folder {}", ws.name, path.display());
+        self.explorer.forget(path);
+        self.explorer.rebuild(self.workspace.as_ref());
+        self.info(format!("Removed {} from the workspace", path.display()));
+    }
+
+    fn save_workspace(&mut self) {
+        let Some(ws) = &self.workspace else {
+            return;
+        };
+        if ws.file.is_none() {
+            self.prompt_save_workspace_as(None);
+            return;
+        }
+        match self.write_workspace() {
+            Ok(()) => {
+                let name = self
+                    .workspace
+                    .as_ref()
+                    .map_or(String::new(), |w| w.name.clone());
+                self.info(format!("Saved workspace {name}"));
+            }
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    fn prompt_save_workspace_as(&mut self, then: Option<PendingAction>) {
+        let Some(ws) = &self.workspace else {
+            return;
+        };
+        let dir = ws
+            .file
+            .as_ref()
+            .and_then(|f| f.parent().map(Path::to_path_buf))
+            .or_else(|| {
+                ws.folders
+                    .first()
+                    .and_then(|f| f.parent().map(Path::to_path_buf))
+            })
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let initial = dir.join(ws.default_file_name()).display().to_string();
+        self.minibuffer = Some(Minibuffer::new(PromptKind::SaveWorkspaceAs(then), initial));
+    }
+
+    fn save_workspace_to(&mut self, input: &str, then: Option<PendingAction>) {
+        let mut path = expand_tilde(input);
+        if !ws_file::is_workspace_file(&path) {
+            let mut name = path.into_os_string();
+            name.push(format!(".{}", ws_file::EXTENSION));
+            path = PathBuf::from(name);
+        }
+        let Some(ws) = &mut self.workspace else {
+            return;
+        };
+        let old = ws.file.replace(path.clone());
+        match self.write_workspace() {
+            Ok(()) => {
+                self.info(format!("Saved workspace to {}", path.display()));
+                if let Some(action) = then {
+                    self.continue_pending(action);
+                }
+            }
+            Err(e) => {
+                if let Some(ws) = &mut self.workspace {
+                    ws.file = old;
+                }
+                self.error(format!("{e:#}"));
+            }
+        }
+    }
+
+    fn open_workspace_now(&mut self, path: &Path) {
+        match self.load_workspace(path) {
+            Ok(missing) => {
+                let name = self
+                    .workspace
+                    .as_ref()
+                    .map_or(String::new(), |w| w.name.clone());
+                log::info!("opened workspace {name} from {}", path.display());
+                if missing.is_empty() {
+                    self.info(format!("Opened workspace {name}"));
+                } else {
+                    self.warn(format!("Could not reopen: {}", missing.join(", ")));
+                }
+            }
+            Err(e) => {
+                log::warn!("open workspace failed: {e:#}");
+                self.error(format!("{e:#}"));
+            }
+        }
+    }
+
+    /// Back to file mode with the startup layout.
+    fn finish_close_workspace(&mut self) {
+        if let Some(ws) = self.workspace.take() {
+            log::info!("closed workspace {}", ws.name);
+            self.info(format!("Closed workspace {}", ws.name));
+        }
+        self.explorer = Explorer::default();
+        self.find.open = false;
+        self.find.clear_results();
+        self.panes = [Pane::default(), Pane::default()];
+        self.panes[0]
+            .docs
+            .push(Document::new_empty(None, self.config.tab_width));
+        self.panes[1]
+            .docs
+            .push(Document::new_virtual(help::HELP_TITLE, &help::help_text()));
+        self.focus = 0;
+        self.split = true;
+    }
+
+    fn quick_open(&mut self) {
+        let Some(ws) = self.workspace.as_ref().filter(|w| !w.folders.is_empty()) else {
+            self.info("Quick Open searches workspace folders: add a folder first");
+            return;
+        };
+        let started = Instant::now();
+        let (files, truncated) =
+            ws_file::files::index(&ws.folders, ws.respect_gitignore, QUICK_OPEN_LIMIT);
+        log::debug!("indexed {} files in {:?}", files.len(), started.elapsed());
+        self.minibuffer = None;
+        self.picker = Some(FilePicker::quick_open(files, truncated));
+    }
+
+    // ---------------------------------------------------------------- explorer
+
+    /// Commands while the Explorer has focus. Returns false to let the command run normally.
+    fn explorer_command(&mut self, cmd: Command) -> bool {
+        use Command::*;
+        let page = self.explorer.visible_rows.saturating_sub(1).max(1) as isize;
+        let ws = self.workspace.as_ref();
+        let ex = &mut self.explorer;
+        match cmd {
+            Cancel | FocusExplorer => ex.focused = false,
+            Move(Motion::Up, _) => ex.move_selection(-1),
+            Move(Motion::Down, _) => ex.move_selection(1),
+            Move(Motion::PageUp, _) => ex.move_selection(-page),
+            Move(Motion::PageDown, _) => ex.move_selection(page),
+            Move(Motion::Home | Motion::DocStart, _) => ex.select(0),
+            Move(Motion::End | Motion::DocEnd, _) => ex.select(ex.rows.len().saturating_sub(1)),
+            Move(Motion::Right, _) => ex.expand_or_enter(ws),
+            Move(Motion::Left, _) => ex.collapse_or_parent(ws),
+            Newline => self.explorer_activate(),
+            Delete => {
+                if let Some(row) = ex.selected_row().filter(|r| r.is_root) {
+                    let path = row.path.clone();
+                    self.minibuffer = Some(Minibuffer::new(
+                        PromptKind::ConfirmRemoveFolder(path),
+                        String::new(),
+                    ));
+                }
+            }
+            // These work without leaving the Explorer.
+            ZoomIn | ZoomOut | ZoomReset | ToggleGitignore | AddFolder | RemoveFolder
+            | SaveWorkspace | SaveWorkspaceAs | WorkspaceMenu | FileMenu | SelectionMenu
+            | ToggleExplorer | ToggleCase | ToggleWholeWord | ToggleRegex => {
+                return false;
+            }
+            // Editing keys have no meaning here.
+            Backspace | DeleteWordLeft | DeleteWordRight | Indent | Outdent | Paste | Cut
+            | Copy | Undo | Redo | SelectAll | SelectLine | DeleteLine | MoveLineUp
+            | MoveLineDown | DuplicateLine | Move(..) | ScrollUp | ScrollDown | Find | FindNext
+            | FindPrev | GotoLine => {}
+            // Anything else (opening files, switching views, quitting...) moves focus back.
+            _ => {
+                ex.focused = false;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Enter/Space in the Explorer: open the file in the focused view, or toggle a folder.
+    fn explorer_activate(&mut self) {
+        match self.explorer.activate(self.workspace.as_ref()) {
+            ExplorerAction::Open(path) => {
+                self.explorer.focused = false;
+                self.open_path(&path);
+                self.ensure_cursor_visible();
+            }
+            ExplorerAction::None => {}
+        }
+    }
+
+    /// Mouse click on Explorer row `index` (relative to the whole list). Opening a file moves
+    /// focus to the view; toggling a folder keeps it in the Explorer.
+    pub fn explorer_click(&mut self, index: usize) {
+        if index >= self.explorer.rows.len() {
+            return;
+        }
+        self.explorer.focused = true;
+        self.explorer.select(index);
+        self.explorer_activate();
     }
 
     // ---------------------------------------------------------------- prompts
@@ -1157,7 +1623,8 @@ impl Editor {
             }
             Find if is_find => return true,
             // Let these work while a prompt is open.
-            ZoomIn | ZoomOut | ZoomReset | Save | Quit | ScrollUp | ScrollDown => return false,
+            ZoomIn | ZoomOut | ZoomReset | Save | Quit | ScrollUp | ScrollDown | ToggleCase
+            | ToggleWholeWord | ToggleRegex => return false,
             _ => return true,
         }
         if matches!(cmd, Backspace | Delete | DeleteWordLeft) {
@@ -1173,10 +1640,18 @@ impl Editor {
         };
         if let PromptKind::Find { origin } = mb.kind {
             self.find_query = mb.input.clone();
-            let Some(q) = Query::new(&self.find_query) else {
-                let doc = self.doc_mut();
-                doc.selection = Selection::point(origin);
-                return;
+            let q = match Query::new(&self.find_query, self.search_opts) {
+                Ok(Some(q)) => q,
+                Ok(None) => {
+                    let doc = self.doc_mut();
+                    doc.selection = Selection::point(origin);
+                    return;
+                }
+                Err(e) => {
+                    self.doc_mut().selection = Selection::point(origin);
+                    self.error(e);
+                    return;
+                }
             };
             match q.find(&self.doc().rope, origin, true) {
                 Some((s, e)) => self.doc_mut().selection = Selection::new(s, e),
@@ -1222,7 +1697,16 @@ impl Editor {
                 self.find_step(true);
             }
             PromptKind::GotoLine => self.goto_line(&input),
-            PromptKind::ConfirmClose { .. } | PromptKind::ConfirmQuit => self.minibuffer = Some(mb),
+            PromptKind::WorkspaceName => self.new_workspace(&input),
+            PromptKind::SaveWorkspaceAs(then) => {
+                if !input.is_empty() {
+                    self.save_workspace_to(&input, then);
+                }
+            }
+            PromptKind::ConfirmClose { .. }
+            | PromptKind::ConfirmDiscard(_)
+            | PromptKind::ConfirmSaveWorkspace(_)
+            | PromptKind::ConfirmRemoveFolder(_) => self.minibuffer = Some(mb),
         }
         self.ensure_cursor_visible();
     }
@@ -1237,8 +1721,15 @@ impl Editor {
                 self.save(AfterSave::CloseDoc);
             }
             (PromptKind::ConfirmClose { pane, index }, 'n') => self.close_doc(pane, index),
-            (PromptKind::ConfirmQuit, 's') => self.continue_quit(),
-            (PromptKind::ConfirmQuit, 'd') => self.should_quit = true,
+            (PromptKind::ConfirmDiscard(action), 's') => self.save_all_then(action),
+            (PromptKind::ConfirmDiscard(action), 'd') => self.continue_pending(action),
+            (PromptKind::ConfirmSaveWorkspace(action), 'y') => {
+                self.prompt_save_workspace_as(Some(action))
+            }
+            // Not saving the workspace: unsaved files still need a decision.
+            (PromptKind::ConfirmSaveWorkspace(action), 'n') => self.check_unsaved_then(action),
+            (PromptKind::ConfirmRemoveFolder(path), 'y') => self.remove_folder(&path),
+            (PromptKind::ConfirmRemoveFolder(_), 'n') => {}
             (_, 'c') => {}
             _ => self.minibuffer = Some(mb), // ignore other keys
         }
@@ -1257,6 +1748,12 @@ impl Editor {
             }
             return;
         };
+        self.goto_line_col(line, col);
+    }
+
+    /// Move the cursor to 1-based `line` and display column `col` (clamped), with the line
+    /// placed near the top third of the view.
+    fn goto_line_col(&mut self, line: usize, col: usize) {
         let tab = self.config.tab_width;
         let doc = self.doc_mut();
         let line = line.clamp(1, doc.rope.len_lines()) - 1;
@@ -1281,9 +1778,16 @@ impl Editor {
     }
 
     fn find_step(&mut self, forward: bool) {
-        let Some(q) = Query::new(&self.find_query) else {
-            self.start_find();
-            return;
+        let q = match Query::new(&self.find_query, self.search_opts) {
+            Ok(Some(q)) => q,
+            Ok(None) => {
+                self.start_find();
+                return;
+            }
+            Err(e) => {
+                self.error(e);
+                return;
+            }
         };
         let doc = self.doc();
         let (s, e) = doc.selection.range();
@@ -1310,11 +1814,73 @@ impl Editor {
             Some(Minibuffer {
                 kind: PromptKind::Find { .. },
                 ..
-            }) => Query::new(&self.find_query),
+            }) => Query::new(&self.find_query, self.search_opts)
+                .ok()
+                .flatten(),
             _ => None,
         }
     }
 }
+
+/// Where `m` moves the head of `sel`, and the goal column for vertical motion.
+fn motion_target(
+    rope: &ropey::Rope,
+    sel: Selection,
+    goal_col: Option<usize>,
+    m: Motion,
+    extend: bool,
+    tab: usize,
+    page: usize,
+) -> (usize, Option<usize>) {
+    let head = sel.head;
+    let (s, e) = sel.range();
+    let collapse = !extend && !sel.is_empty();
+    let vertical = |lines: isize| -> (usize, Option<usize>) {
+        let line = rope.char_to_line(head) as isize;
+        let goal = goal_col.unwrap_or_else(|| mv::col_of(rope, head, tab));
+        let target = line + lines;
+        let pos = if target < 0 {
+            0
+        } else if target >= rope.len_lines() as isize {
+            rope.len_chars()
+        } else {
+            mv::pos_at_col(rope, target as usize, goal, tab)
+        };
+        (pos, Some(goal))
+    };
+    let pos = match m {
+        Motion::Left if collapse => s,
+        Motion::Right if collapse => e,
+        Motion::Left => mv::prev_grapheme(rope, head),
+        Motion::Right => mv::next_grapheme(rope, head),
+        Motion::WordLeft => mv::prev_word_start(rope, head),
+        Motion::WordRight => mv::next_word_end(rope, head),
+        Motion::Home => mv::smart_home(rope, head),
+        Motion::End => mv::line_content_end(rope, rope.char_to_line(head)),
+        Motion::DocStart => 0,
+        Motion::DocEnd => rope.len_chars(),
+        Motion::Up => return vertical(-1),
+        Motion::Down => return vertical(1),
+        Motion::PageUp => return vertical(-(page as isize)),
+        Motion::PageDown => return vertical(page as isize),
+    };
+    (pos, None)
+}
+
+/// The picker kind a command opens, so pressing it again closes the picker.
+fn picker_kind_for(cmd: Command) -> Option<PickerKind> {
+    match cmd {
+        Command::OpenFile => Some(PickerKind::OpenFile),
+        Command::QuickOpen => Some(PickerKind::QuickOpen),
+        Command::OpenWorkspace => Some(PickerKind::OpenWorkspace),
+        Command::AddFolder => Some(PickerKind::ChooseFolder),
+        Command::RemoveFolder => Some(PickerKind::RemoveFolder),
+        _ => None,
+    }
+}
+
+/// Files indexed for Quick Open at most.
+const QUICK_OPEN_LIMIT: usize = 100_000;
 
 /// Commands that need a document; ignored while the focused view is empty.
 fn needs_doc(cmd: Command) -> bool {
@@ -1322,6 +1888,24 @@ fn needs_doc(cmd: Command) -> bool {
     !matches!(
         cmd,
         NewFile
+            | WorkspaceMenu
+            | QuickOpen
+            | FindInFiles
+            | NextResult
+            | PrevResult
+            | ToggleCase
+            | ToggleWholeWord
+            | ToggleRegex
+            | ToggleExplorer
+            | FocusExplorer
+            | NewWorkspace
+            | OpenWorkspace
+            | SaveWorkspace
+            | SaveWorkspaceAs
+            | AddFolder
+            | RemoveFolder
+            | ToggleGitignore
+            | CloseWorkspace
             | OpenFile
             | OpenPath
             | Help
@@ -1332,6 +1916,7 @@ fn needs_doc(cmd: Command) -> bool {
             | ToggleSplit
             | ResetSplit
             | FileMenu
+            | SelectionMenu
             | ZoomIn
             | ZoomOut
             | ZoomReset
@@ -1423,11 +2008,16 @@ mod tests {
         ed.execute(Command::Help);
         assert_eq!((ed.focus, ed.pane().active), (1, 0));
         assert_eq!(ed.panes[1].docs.len(), 2);
-        // In one-view mode, Help still goes right and brings that view up.
+        // With the panel hidden, Help shows it again.
         ed.execute(Command::FocusLeft);
         ed.execute(Command::ToggleSplit);
+        assert!(!ed.split);
         ed.execute(Command::Help);
         assert_eq!(ed.focus, 1);
+        assert!(ed.split);
+        // Hiding the panel while it has focus moves the cursor to the editor.
+        ed.execute(Command::ToggleSplit);
+        assert_eq!(ed.focus, 0);
     }
 
     #[test]
@@ -1441,15 +2031,17 @@ mod tests {
         ed.open_path(&file);
         assert_eq!(ed.focus, 0);
         assert_eq!(ed.panes[0].docs.len(), 1);
-        // A new file opened while the right view has focus lands on the right.
+        // Files never open in the panel: new files and untitled tabs go left too.
         ed.execute(Command::FocusRight);
         let other = dir.join("b.txt");
         ed.open_path(&other);
-        assert_eq!(ed.focus, 1);
-        assert_eq!(
-            titles(&ed, 1),
-            [help::HELP_TITLE.to_string(), "b.txt".into()]
-        );
+        assert_eq!(ed.focus, 0);
+        assert_eq!(titles(&ed, 0), ["a.txt", "b.txt"]);
+        assert_eq!(titles(&ed, 1), [help::HELP_TITLE]);
+        ed.execute(Command::FocusRight);
+        ed.execute(Command::NewFile);
+        assert_eq!(ed.focus, 0);
+        assert_eq!(ed.panes[0].docs.len(), 3);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1490,7 +2082,7 @@ mod tests {
         assert!(!ed.should_quit);
         assert!(matches!(
             ed.minibuffer.as_ref().map(|m| &m.kind),
-            Some(PromptKind::ConfirmQuit)
+            Some(PromptKind::ConfirmDiscard(PendingAction::Quit))
         ));
     }
 

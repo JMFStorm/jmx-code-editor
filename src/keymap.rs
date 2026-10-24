@@ -87,9 +87,15 @@ const OTHERS: &[Binding] = &[
     bind(true, YES, false, c('o'), OpenPath),
     bind(true, NO, false, c('s'), Save),
     bind(true, YES, false, c('s'), SaveAs),
+    bind(true, ANY, false, c('r'), RevertFile),
     bind(true, ANY, false, c('w'), CloseFile),
     bind(true, ANY, false, c('q'), Quit),
     bind(false, ANY, true, c('f'), FileMenu),
+    // Workspace
+    bind(false, ANY, true, c('w'), WorkspaceMenu),
+    bind(true, NO, false, c('p'), QuickOpen),
+    bind(true, NO, false, c('b'), ToggleExplorer),
+    bind(true, YES, false, c('e'), FocusExplorer),
     // Split views
     bind(false, NO, false, n(NK::F6), FocusOtherView),
     bind(true, ANY, false, c('1'), FocusLeft),
@@ -112,7 +118,11 @@ const OTHERS: &[Binding] = &[
     bind(false, ANY, true, c('9'), GotoTab(8)),
     // Selection
     bind(true, NO, false, c('a'), SelectAll),
-    bind(true, ANY, false, c('l'), SelectLine),
+    bind(true, NO, false, c('l'), SelectLine),
+    bind(false, YES, true, c('.'), AddNextOccurrence),
+    bind(false, YES, true, c(','), RemoveLastOccurrence),
+    bind(true, YES, false, c('l'), SelectAllOccurrences),
+    bind(false, ANY, true, c('s'), SelectionMenu),
     bind(false, ANY, false, n(NK::Escape), Cancel),
     // Editing
     bind(false, ANY, false, n(NK::Enter), Newline),
@@ -122,7 +132,7 @@ const OTHERS: &[Binding] = &[
     bind(true, ANY, false, n(NK::Backspace), DeleteWordLeft),
     bind(false, NO, false, n(NK::Delete), Delete),
     bind(true, ANY, false, n(NK::Delete), DeleteWordRight),
-    bind(true, YES, false, c('k'), DeleteLine),
+    bind(true, ANY, false, c('k'), DeleteLine),
     bind(false, ANY, true, n(NK::ArrowUp), MoveLineUp),
     bind(false, ANY, true, n(NK::ArrowDown), MoveLineDown),
     bind(true, ANY, false, c('d'), DuplicateLine),
@@ -137,10 +147,16 @@ const OTHERS: &[Binding] = &[
     bind(true, ANY, false, c('y'), Redo),
     bind(true, YES, false, c('z'), Redo),
     // Search & navigation
-    bind(true, ANY, false, c('f'), Find),
+    bind(true, NO, false, c('f'), Find),
     bind(false, NO, false, n(NK::F3), FindNext),
     bind(false, YES, false, n(NK::F3), FindPrev),
     bind(true, ANY, false, c('g'), GotoLine),
+    bind(true, YES, false, c('f'), FindInFiles),
+    bind(false, NO, false, n(NK::F8), NextResult),
+    bind(false, YES, false, n(NK::F8), PrevResult),
+    bind(false, ANY, true, c('c'), ToggleCase),
+    bind(false, ANY, true, c('o'), ToggleWholeWord),
+    bind(false, ANY, true, c('r'), ToggleRegex),
     // View & help
     bind(true, ANY, false, n(NK::ArrowUp), ScrollUp),
     bind(true, ANY, false, n(NK::ArrowDown), ScrollDown),
@@ -313,6 +329,24 @@ mod tests {
         let cs = ModifiersState::CONTROL | ModifiersState::SHIFT;
         assert_eq!(lookup(cs, &Key::Character("K".into())), Some(DeleteLine));
         assert_eq!(lookup(cs, &Key::Character("S".into())), Some(SaveAs));
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(lookup(ctrl, &Key::Character("k".into())), Some(DeleteLine));
+        assert_eq!(lookup(ctrl, &Key::Character("r".into())), Some(RevertFile));
+        assert_eq!(lookup(ctrl, &Key::Character("l".into())), Some(SelectLine));
+        assert_eq!(
+            lookup(cs, &Key::Character("L".into())),
+            Some(SelectAllOccurrences)
+        );
+        // The session matches the unshifted key, so Shift+Alt+. works on any layout.
+        let sa = ModifiersState::SHIFT | ModifiersState::ALT;
+        assert_eq!(
+            lookup(sa, &Key::Character(".".into())),
+            Some(AddNextOccurrence)
+        );
+        assert_eq!(
+            lookup(sa, &Key::Character(",".into())),
+            Some(RemoveLastOccurrence)
+        );
         let altgr = ModifiersState::CONTROL | ModifiersState::ALT;
         assert_eq!(lookup(altgr, &Key::Character("7".into())), None);
         assert_eq!(
@@ -325,7 +359,7 @@ mod tests {
     fn labels_and_listing() {
         if !cfg!(target_os = "macos") {
             assert_eq!(shortcut_for(Save).as_deref(), Some("Ctrl+S"));
-            assert_eq!(shortcut_for(DeleteLine).as_deref(), Some("Ctrl+Shift+K"));
+            assert_eq!(shortcut_for(DeleteLine).as_deref(), Some("Ctrl+K"));
         }
         let text = listing_text();
         assert!(text.contains("Save file as"));

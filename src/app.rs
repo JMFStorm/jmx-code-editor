@@ -7,7 +7,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+use winit::window::{CursorIcon, Icon, Window, WindowId};
 
 use crate::commands::Command;
 use crate::editor::{Editor, MESSAGE_TIMEOUT};
@@ -98,6 +99,10 @@ impl App {
             let t = m.at + MESSAGE_TIMEOUT;
             next = Some(next.map_or(t, |n| n.min(t)));
         }
+        // Background search: debounce timer and result polling.
+        if let Some(t) = self.session.editor.next_deadline() {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
         next
     }
 }
@@ -110,7 +115,8 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title("JMX")
             .with_inner_size(LogicalSize::new(1100.0, 720.0))
-            .with_min_inner_size(LogicalSize::new(320.0, 200.0));
+            .with_min_inner_size(LogicalSize::new(320.0, 200.0))
+            .with_window_icon(window_icon());
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -136,6 +142,7 @@ impl ApplicationHandler for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
             self.session.editor.expire_message();
+            self.session.editor.poll_jobs();
             self.request_redraw();
         }
     }
@@ -173,7 +180,10 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                self.session.key(&event.logical_key, event.text.as_deref());
+                // Shortcuts match the unshifted key, so Shift+Alt+. works on any layout.
+                let base = event.key_without_modifiers();
+                self.session
+                    .key(&event.logical_key, &base, event.text.as_deref());
                 self.after_input(event_loop);
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -221,5 +231,31 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+    }
+}
+
+/// The app icon for the title bar and taskbar, decoded from the embedded PNG.
+fn window_icon() -> Option<Icon> {
+    let decode = || -> anyhow::Result<Icon> {
+        let bytes = include_bytes!("../assets/icon-64.png");
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes[..])).read_info()?;
+        let mut buf = vec![0; reader.output_buffer_size().unwrap_or(64 * 64 * 4)];
+        let info = reader.next_frame(&mut buf)?;
+        if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+            anyhow::bail!("icon must be 8-bit RGBA, not {:?}", info.color_type);
+        }
+        buf.truncate(info.buffer_size());
+        Ok(Icon::from_rgba(buf, info.width, info.height)?)
+    };
+    decode()
+        .map_err(|e| log::warn!("window icon unavailable: {e:#}"))
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn embedded_icon_decodes() {
+        assert!(super::window_icon().is_some());
     }
 }

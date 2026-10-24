@@ -15,32 +15,109 @@ keyboard alone, and the common actions also work with just the mouse.
 This page is read-only. Close it with Ctrl+W, search it with Ctrl+F.
 
 
-Two views
----------
-The window is split into a left and a right view, each with its own tabs.
-Files open in the view that has the cursor; Help and Shortcuts open on the
-right. The tab with the blue line on top is where you are typing.
+Editor and panel
+----------------
+The left view is the editor: every file opens there. The right view is a
+panel for the editor's own pages (Help, Shortcuts; later errors and
+settings). The tab with the blue line on top is where the cursor is.
 
-  F6               move the cursor to the other view
-  Ctrl+1 / Ctrl+2  move the cursor to the left / right view
-  Shift+F6         switch between one and two views (one view shows the view
-                   with the cursor; F6 flips to the other one)
-  Drag the line    resize the views (mouse)
+  F6               move the cursor between the editor and the panel
+  Ctrl+1 / Ctrl+2  move the cursor to the editor / the panel
+  Shift+F6         hide / show the panel (F1, F2 and Ctrl+2 show it again)
+  Drag the line    resize the panel (mouse)
   Ctrl+F6          center the line again (or double-click it)
+
+Editing extras
+--------------
+  Ctrl+K           delete the line
+  Ctrl+R           revert: discard all unsaved changes to the file
+                   (one undo step, so Ctrl+Z brings them back)
+
+Multiple cursors
+----------------
+  Shift+Alt+.      select the word under the cursor; press again to add the
+                   next occurrence of the selection as another cursor
+  Shift+Alt+,      remove the occurrence added last
+  Ctrl+Shift+L     select all occurrences at once
+  Esc              back to one cursor
+Typing, Backspace/Delete, Enter, Tab, arrows/Home/End (with Shift too),
+copy, cut and paste act at every cursor. Copying from N cursors and pasting
+into N cursors puts one piece at each. Other commands go back to one cursor
+first. The Selection menu in the bar has the same commands.
 
 Clicking in a view also moves the cursor there; the mouse wheel scrolls the
 view under the mouse. A file is open in only one view at a time.
+
+
+Workspaces
+----------
+JMX starts in file mode: open and edit any files. A workspace is a named set
+of folders plus the whole editor state (tabs, cursors, views, unsaved edits),
+saved as a .jmxws project file.
+
+Workspace menu (Alt+W):
+  New Workspace…        give it a name; your open tabs stay open
+  Open Workspace…       pick a .jmxws file (or: jmx project.jmxws)
+  Save Workspace (As…)  write the project file
+  Add Folder…           choose a folder; all files under it are available
+  Remove Folder…        take a folder out of the workspace
+  Respect .gitignore    hide git-ignored files (on by default)
+  Close Workspace       back to file mode
+
+Once a workspace has been saved, it saves itself automatically when you
+quit, close it or open another workspace. Unsaved edits are kept inside the
+workspace file (your files on disk are not touched) and come back when you
+reopen it; Ctrl+Z goes back to the version on disk. Files outside the
+workspace folders can still be opened as usual.
+
+Explorer (Ctrl+B show/hide, Ctrl+Shift+E to move the cursor there):
+  Up/Down, PgUp/PgDn    move        Right / Left   expand / collapse
+  Enter or Space        open file / toggle folder
+  a letter              jump to the next name starting with it
+  Delete                remove a top-level folder from the workspace
+  Esc                   back to the editor
+  Mouse: click to open or toggle, drag the right edge to resize, + adds a
+  folder.
+
+Quick Open (Ctrl+P): type a few letters of a file name, e.g. appvue, and
+press Enter. Searches every file in the workspace folders. Add :N to go to
+a line straight away, e.g. appvue:42 (or appvue:42:7 for a column). You
+can also pick a file with the arrows first and then type :42.
+
+
+Search
+------
+  Ctrl+F           find in this file (Enter / F3 next, Shift+F3 previous)
+  Ctrl+Shift+F     Find in Files: search every file in the workspace
+                   (in file mode: the current file's folder)
+  F8 / Shift+F8    next / previous Find in Files result, panel closed
+  Alt+C            option: match case (off = ignore case)
+  Alt+O            option: whole word
+  Alt+R            option: regular expression
+The options apply to Ctrl+F and Find in Files alike; lit chips (Aa ab .*)
+show which are on.
+
+In the Find in Files panel:
+  Type             the search text; results update as you type
+  Tab              switch to the Files filter and back, e.g.
+                   *.js, .vue, src/**, !*.spec.js  (! excludes)
+  Up/Down, PgUp/PgDn   pick a result      Enter   open it at the match
+  Esc              close (Ctrl+Shift+F reopens the last results)
+Files with unsaved edits are searched as they are in the editor.
 
 
 Menu bar
 --------
 The bar at the very top works with plain mouse clicks:
 
-  File (Alt+F)     New, Open, Open Path, Save, Save As, Close Tab, Quit
+  Workspace (Alt+W) workspaces, folders, Explorer, Quick Open (see above)
+  File (Alt+F)     New, Open, Open Path, Save, Save As, Revert, Close, Quit
+  Selection (Alt+S) select all / line, add occurrences (multiple cursors)
   Help  F1         show this page
   Shortcuts  F2    show every keyboard shortcut
 
-In the File menu, Up/Down choose an item, Enter runs it and Esc closes it.
+In a menu, Up/Down choose an item, Left/Right switch menus, Enter runs it and
+Esc closes it.
 Hover over a button to see what it does in the status bar.
 
 

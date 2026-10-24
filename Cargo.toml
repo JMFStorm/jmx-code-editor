@@ -8,10 +8,14 @@ anyhow = "1.0.104"
 arboard = "3.7.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glyphon = "0.12.0"
+ignore = "0.4.33"
 log = { version = "0.4.34", features = ["max_level_trace", "release_max_level_info"] }
 png = "0.18.1"
 pollster = "1.0.1"
+regex = "1.13.1"
 ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 wgpu = "30.0.1"
@@ -25,3 +29,6 @@ strip = true
 # Keep dependencies optimized in debug builds so text shaping stays fast while developing.
 [profile.dev.package."*"]
 opt-level = 2
+
+[build-dependencies]
+embed-resource = "3.0.12"

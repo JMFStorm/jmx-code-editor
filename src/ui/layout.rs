@@ -46,9 +46,12 @@ pub struct Layout {
     pub divider: Option<Rect>,
     /// The visible 1px line itself.
     pub divider_line: Option<Rect>,
+    /// Explorer sidebar, when visible.
+    pub sidebar: Option<SidebarLayout>,
     pub status: Rect,
     pub minibuffer: Option<Rect>,
     pub picker: Option<PickerLayout>,
+    pub find: Option<FindLayout>,
 }
 
 /// Geometry of one view: its tab bar, line-number gutter and text area.
@@ -93,36 +96,47 @@ impl Layout {
         let body_y = toolbar.bottom();
         let body_h = (status.y - body_y).max(0.0);
 
+        // Explorer sidebar on the left; the views share the rest.
+        let line_w = scale.max(1.0).round();
+        let sidebar = ed.explorer.visible.then(|| {
+            let w = (ed.explorer.width_cols * cell_w)
+                .min(width * 0.6)
+                .max(cell_w * 10.0)
+                .round();
+            let area = Rect::new(0.0, body_y, w, body_h);
+            SidebarLayout::compute(ed, area, bar_h, line_h, line_w, scale)
+        });
+        let body_x = sidebar.as_ref().map_or(0.0, |s| s.area.right() + line_w);
+        let body_w = (width - body_x).max(0.0);
+
         let mut panes = Vec::new();
         let (mut divider, mut divider_line) = (None, None);
         if ed.split {
-            let line_w = scale.max(1.0).round();
             let min_w = MIN_PANE_COLS * cell_w;
-            let mut left_w = (width * ed.split_ratio).round();
-            if width - line_w >= 2.0 * min_w {
-                left_w = left_w.clamp(min_w, width - line_w - min_w);
+            let mut left_w = (body_w * ed.split_ratio).round();
+            if body_w - line_w >= 2.0 * min_w {
+                left_w = left_w.clamp(min_w, body_w - line_w - min_w);
             }
-            let left = Rect::new(0.0, body_y, left_w, body_h);
-            let right = Rect::new(left_w + line_w, body_y, width - left_w - line_w, body_h);
+            let left = Rect::new(body_x, body_y, left_w, body_h);
+            let right_x = body_x + left_w + line_w;
+            let right = Rect::new(right_x, body_y, width - right_x, body_h);
             panes.push(PaneLayout::compute(ed, 0, left, bar_h, cell_w, line_h));
             panes.push(PaneLayout::compute(ed, 1, right, bar_h, cell_w, line_h));
             let grab = (DIVIDER_GRAB * scale).round();
-            divider_line = Some(Rect::new(left_w, body_y, line_w, body_h));
-            divider = Some(Rect::new(
-                left_w - grab,
-                body_y,
-                line_w + 2.0 * grab,
-                body_h,
-            ));
+            let x = body_x + left_w;
+            divider_line = Some(Rect::new(x, body_y, line_w, body_h));
+            divider = Some(Rect::new(x - grab, body_y, line_w + 2.0 * grab, body_h));
         } else {
-            let area = Rect::new(0.0, body_y, width, body_h);
-            panes.push(PaneLayout::compute(
-                ed, ed.focus, area, bar_h, cell_w, line_h,
-            ));
+            let area = Rect::new(body_x, body_y, body_w, body_h);
+            // The panel is hidden: only the editor view shows.
+            panes.push(PaneLayout::compute(ed, 0, area, bar_h, cell_w, line_h));
         }
 
         let picker = ed.picker.as_ref().map(|_| {
             PickerLayout::compute(Rect::new(0.0, body_y, width, body_h), bar_h, cell_w, line_h)
+        });
+        let find = ed.find.open.then(|| {
+            FindLayout::compute(Rect::new(0.0, body_y, width, body_h), bar_h, cell_w, line_h)
         });
         Self {
             width,
@@ -130,10 +144,12 @@ impl Layout {
             cell_w,
             line_h,
             scale,
+            find,
             toolbar,
             panes,
             divider,
             divider_line,
+            sidebar,
             status,
             minibuffer,
             picker,
@@ -150,13 +166,67 @@ impl Layout {
         self.panes.iter().find(|p| p.pane == pane)
     }
 
-    /// Split ratio for a divider dragged to `x`.
+    /// Split ratio for a divider dragged to `x` (the views start right of the sidebar).
     pub fn ratio_at(&self, x: f32) -> f32 {
-        if self.width <= 0.0 {
+        let start = self.panes.first().map_or(0.0, |p| p.area.x);
+        let width = self.width - start;
+        if width <= 0.0 {
             0.5
         } else {
-            x / self.width
+            (x - start) / width
         }
+    }
+
+    /// Explorer width in columns for a sidebar edge dragged to `x`.
+    pub fn sidebar_cols_at(&self, x: f32) -> f32 {
+        (x / self.cell_w).round()
+    }
+}
+
+/// Geometry of the Explorer sidebar.
+#[derive(Debug, Clone)]
+pub struct SidebarLayout {
+    pub area: Rect,
+    /// Title bar with the workspace name.
+    pub header: Rect,
+    /// "+" (add folder) button in the header, in workspace mode.
+    pub add_button: Option<Rect>,
+    pub list: Rect,
+    pub rows: usize,
+    /// Visible 1px line at the right edge.
+    pub edge_line: Rect,
+    /// Grab area for resizing.
+    pub edge: Rect,
+    pub line_h: f32,
+}
+
+impl SidebarLayout {
+    fn compute(ed: &Editor, area: Rect, bar_h: f32, line_h: f32, line_w: f32, scale: f32) -> Self {
+        let header = Rect::new(area.x, area.y, area.w, bar_h);
+        let add_button = ed
+            .workspace
+            .as_ref()
+            .map(|_| Rect::new(area.right() - bar_h, area.y, bar_h, bar_h));
+        let list = Rect::new(area.x, header.bottom(), area.w, (area.h - bar_h).max(0.0));
+        let grab = (DIVIDER_GRAB * scale).round();
+        Self {
+            area,
+            header,
+            add_button,
+            list,
+            rows: ((list.h / line_h).floor() as usize).max(1),
+            edge_line: Rect::new(area.right(), area.y, line_w, area.h),
+            edge: Rect::new(area.right() - grab, area.y, line_w + 2.0 * grab, area.h),
+            line_h,
+        }
+    }
+
+    /// List row (relative to the scroll offset) under a point.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.list
+            .contains(x, y)
+            .then(|| ((y - self.list.y) / self.line_h).floor() as usize)
+            .filter(|r| *r < self.rows)
     }
 }
 
@@ -242,6 +312,89 @@ pub fn tab_rects(ed: &Editor, pl: &PaneLayout, scale: f32) -> Vec<TabRect> {
     tabs
 }
 
+/// Geometry of the Find in Files panel.
+#[derive(Debug, Clone)]
+pub struct FindLayout {
+    pub panel: Rect,
+    pub title: Rect,
+    /// Option chips in the title bar: match case, whole word, regex.
+    pub chips: [Rect; 3],
+    pub query: Rect,
+    pub include: Rect,
+    pub list: Rect,
+    pub footer: Rect,
+    pub rows: usize,
+    pub line_h: f32,
+}
+
+/// Labels of the search option chips, in `FindLayout::chips` order.
+pub const CHIP_LABELS: [&str; 3] = ["Aa", "ab", ".*"];
+
+/// Search option chips right-aligned in `bar` (find panel title, Find prompt).
+pub fn chip_rects(bar: Rect, cell_w: f32, line_h: f32) -> [Rect; 3] {
+    let chip_w = (cell_w * 4.0).round();
+    let gap = (cell_w * 0.5).round();
+    let chip_h = (line_h * 1.1).round().min(bar.h);
+    let y = (bar.y + (bar.h - chip_h) / 2.0).round();
+    std::array::from_fn(|i| {
+        let x = bar.right() - cell_w - (3 - i) as f32 * (chip_w + gap) + gap;
+        Rect::new(x.round(), y, chip_w, chip_h)
+    })
+}
+
+impl FindLayout {
+    fn compute(body: Rect, bar_h: f32, cell_w: f32, line_h: f32) -> Self {
+        let w = (body.w * 0.75)
+            .max(60.0 * cell_w)
+            .min(body.w - 2.0 * cell_w)
+            .max(0.0)
+            .round();
+        let h = (body.h * 0.85)
+            .max(bar_h * 4.0 + line_h * 3.0)
+            .min(body.h)
+            .round();
+        let panel = Rect::new(
+            (body.x + (body.w - w) / 2.0).round(),
+            (body.y + (body.h - h) / 4.0).round(),
+            w,
+            h,
+        );
+        let title = Rect::new(panel.x, panel.y, panel.w, bar_h);
+        let chips = chip_rects(title, cell_w, line_h);
+        let query = Rect::new(panel.x, title.bottom(), panel.w, bar_h);
+        let include = Rect::new(panel.x, query.bottom(), panel.w, bar_h);
+        let footer = Rect::new(panel.x, panel.bottom() - bar_h, panel.w, bar_h);
+        let list_y = include.bottom() + line_h * 0.25;
+        let list_h = (footer.y - list_y - line_h * 0.25).max(line_h);
+        let list = Rect::new(panel.x, list_y, panel.w, list_h);
+        let rows = ((list.h / line_h).floor() as usize).max(1);
+        Self {
+            panel,
+            title,
+            chips,
+            query,
+            include,
+            list,
+            footer,
+            rows,
+            line_h,
+        }
+    }
+
+    /// List row (relative to the scroll offset) under a point.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.list
+            .contains(x, y)
+            .then(|| ((y - self.list.y) / self.line_h).floor() as usize)
+            .filter(|r| *r < self.rows)
+    }
+
+    /// Option chip under a point.
+    pub fn chip_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.chips.iter().position(|c| c.contains(x, y))
+    }
+}
+
 /// Geometry of the file picker overlay.
 #[derive(Debug, Clone)]
 pub struct PickerLayout {
@@ -308,18 +461,30 @@ fn with_key(label: &str, cmd: Command) -> String {
     }
 }
 
-/// Menu bar: the File menu on the left, Help and Shortcuts (with their keys) on the right.
-pub fn toolbar_buttons(layout: &Layout) -> Vec<ToolButton> {
+/// Menu bar: Workspace and File menus on the left, Help and Shortcuts (with keys) on the right.
+pub fn toolbar_buttons(layout: &Layout, ed: &Editor) -> Vec<ToolButton> {
     let bar = layout.toolbar;
     let width = |label: &str| ((label.width() + 3) as f32 * layout.cell_w).round();
     let gap = (layout.cell_w * 0.5).round();
-    let file = "File".to_string();
-    let file_w = width(&file);
-    let mut out = vec![ToolButton {
-        rect: Rect::new(gap, bar.y, file_w, bar.h),
-        label: file,
-        cmd: Command::FileMenu,
-    }];
+    let workspace = match &ed.workspace {
+        Some(ws) => format!("Workspace: {}", ws.name),
+        None => "Workspace".to_string(),
+    };
+    let mut out = Vec::new();
+    let mut x = gap;
+    for (label, cmd) in [
+        (workspace, Command::WorkspaceMenu),
+        ("File".to_string(), Command::FileMenu),
+        ("Selection".to_string(), Command::SelectionMenu),
+    ] {
+        let w = width(&label);
+        out.push(ToolButton {
+            rect: Rect::new(x, bar.y, w, bar.h),
+            label,
+            cmd,
+        });
+        x += w;
+    }
     let right = [
         (with_key("Help", Command::Help), Command::Help),
         (
@@ -328,7 +493,7 @@ pub fn toolbar_buttons(layout: &Layout) -> Vec<ToolButton> {
         ),
     ];
     let right_w: f32 = right.iter().map(|(l, _)| width(l)).sum();
-    let mut x = (bar.right() - right_w - gap).max(gap + file_w + layout.cell_w * 2.0);
+    let mut x = (bar.right() - right_w - gap).max(x + layout.cell_w * 2.0);
     for (label, cmd) in right {
         let w = width(&label);
         out.push(ToolButton {
@@ -341,89 +506,6 @@ pub fn toolbar_buttons(layout: &Layout) -> Vec<ToolButton> {
     out
 }
 
-/// Entries of the File menu; `None` is a separator.
-pub const FILE_MENU: [Option<(&str, Command)>; 8] = [
-    Some(("New", Command::NewFile)),
-    Some(("Open…", Command::OpenFile)),
-    Some(("Open Path…", Command::OpenPath)),
-    Some(("Save", Command::Save)),
-    Some(("Save As…", Command::SaveAs)),
-    Some(("Close Tab", Command::CloseFile)),
-    None,
-    Some(("Quit", Command::Quit)),
-];
-
-pub struct MenuRow {
-    pub rect: Rect,
-    pub label: &'static str,
-    /// Shortcut text shown right-aligned.
-    pub keys: String,
-    /// `None` for a separator.
-    pub cmd: Option<Command>,
-}
-
-pub struct MenuLayout {
-    pub panel: Rect,
-    pub rows: Vec<MenuRow>,
-}
-
-impl MenuLayout {
-    /// Index of the (non-separator) row under a point.
-    pub fn item_at(&self, x: f32, y: f32) -> Option<usize> {
-        self.rows
-            .iter()
-            .position(|r| r.cmd.is_some() && r.rect.contains(x, y))
-    }
-}
-
-/// The File dropdown, anchored under the File button.
-pub fn file_menu_layout(layout: &Layout) -> MenuLayout {
-    let anchor = toolbar_buttons(layout)
-        .into_iter()
-        .next()
-        .map_or(layout.toolbar, |b| b.rect);
-    let items: Vec<(&'static str, String, Option<Command>)> = FILE_MENU
-        .iter()
-        .map(|e| match e {
-            Some((label, cmd)) => (
-                *label,
-                keymap::shortcut_for(*cmd).unwrap_or_default(),
-                Some(*cmd),
-            ),
-            None => ("", String::new(), None),
-        })
-        .collect();
-    let cols = items
-        .iter()
-        .map(|(l, k, _)| l.width() + k.width())
-        .max()
-        .unwrap_or(10)
-        + 8;
-    let w = (cols as f32 * layout.cell_w).round();
-    let row_h = (layout.line_h * 1.4).round();
-    let sep_h = (layout.line_h * 0.6).round();
-    let pad = (layout.line_h * 0.25).round();
-    let mut y = anchor.bottom() + pad;
-    let rows = items
-        .into_iter()
-        .map(|(label, keys, cmd)| {
-            let h = if cmd.is_some() { row_h } else { sep_h };
-            let r = MenuRow {
-                rect: Rect::new(anchor.x, y, w, h),
-                label,
-                keys,
-                cmd,
-            };
-            y += h;
-            r
-        })
-        .collect();
-    MenuLayout {
-        panel: Rect::new(anchor.x, anchor.bottom(), w, y + pad - anchor.bottom()),
-        rows,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,29 +513,32 @@ mod tests {
 
     #[test]
     fn toolbar_and_menu_hit_testing() {
+        use crate::ui::menu::{MenuId, menu_layout};
         let mut ed = Editor::new(Config::default(), &[]);
         let l = Layout::compute(&ed, 1000.0, 600.0, 10.0, 20.0, 1.0);
-        let buttons = toolbar_buttons(&l);
+        let buttons = toolbar_buttons(&l, &ed);
         let hit = |x: f32| {
             buttons
                 .iter()
                 .find(|b| b.rect.contains(x, l.toolbar.y + 5.0))
                 .map(|b| b.cmd)
         };
-        assert_eq!(hit(10.0), Some(Command::FileMenu));
+        assert_eq!(hit(10.0), Some(Command::WorkspaceMenu));
+        assert_eq!(hit(buttons[1].rect.x + 2.0), Some(Command::FileMenu));
         assert_eq!(hit(990.0), Some(Command::ShowShortcuts));
+        assert_eq!(hit(buttons[2].rect.x + 2.0), Some(Command::SelectionMenu));
         assert_eq!(hit(500.0), None);
-        assert!(buttons[1].label.ends_with("F1"));
-        assert!(buttons[2].label.ends_with("F2"));
+        assert!(buttons[3].label.ends_with("F1"));
+        assert!(buttons[4].label.ends_with("F2"));
 
-        let menu = file_menu_layout(&l);
+        let menu = menu_layout(&l, &ed, MenuId::File, buttons[1].rect);
         let first = &menu.rows[0];
         assert_eq!(
             menu.item_at(first.rect.x + 2.0, first.rect.y + 2.0),
             Some(0)
         );
-        let sep = &menu.rows[6];
-        assert_eq!(sep.cmd, None);
+        let sep = &menu.rows[7];
+        assert_eq!(sep.entry.cmd, None);
         assert_eq!(menu.item_at(sep.rect.x + 2.0, sep.rect.y + 1.0), None);
         assert!(menu.panel.y >= l.toolbar.bottom());
 
@@ -483,12 +568,23 @@ mod tests {
         let l = Layout::compute(&ed, 1000.0, 600.0, 10.0, 20.0, 1.0);
         assert_eq!(l.panes[0].area.w, 200.0);
 
-        // One view: the focused view fills the width.
+        // Explorer sidebar takes space on the left; views split the rest.
+        ed.split_ratio = 0.5;
+        ed.explorer.visible = true;
+        let l = Layout::compute(&ed, 1000.0, 600.0, 10.0, 20.0, 1.0);
+        let sb = l.sidebar.as_ref().unwrap();
+        assert_eq!(sb.area.w, 320.0);
+        assert!(l.panes[0].area.x > sb.area.right());
+        assert!((l.panes[1].area.right() - 1000.0).abs() < 1.0);
+        let mid = l.divider_line.unwrap().x;
+        assert!((l.ratio_at(mid) - 0.5).abs() < 0.01);
+        ed.explorer.visible = false;
+
+        // Panel hidden: the editor view fills the width.
         ed.split = false;
-        ed.focus = 1;
         let l = Layout::compute(&ed, 1000.0, 600.0, 10.0, 20.0, 1.0);
         assert_eq!(l.panes.len(), 1);
-        assert_eq!(l.panes[0].pane, 1);
+        assert_eq!(l.panes[0].pane, 0);
         assert_eq!(l.panes[0].area.w, 1000.0);
         assert!(l.divider.is_none());
     }

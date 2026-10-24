@@ -68,6 +68,8 @@ pub enum Command {
     OpenPath,
     Save,
     SaveAs,
+    /// Reload the file from disk, discarding unsaved changes (one undo step).
+    RevertFile,
     CloseFile,
     NextTab,
     PrevTab,
@@ -77,6 +79,14 @@ pub enum Command {
     FindNext,
     FindPrev,
     GotoLine,
+    /// Grep-style search across the workspace (overlay panel).
+    FindInFiles,
+    /// Jump to the next / previous Find in Files result.
+    NextResult,
+    PrevResult,
+    ToggleCase,
+    ToggleWholeWord,
+    ToggleRegex,
 
     ScrollUp,
     ScrollDown,
@@ -95,6 +105,28 @@ pub enum Command {
     ResetSplit,
     /// Open the File menu (handled by the session, which owns menu state).
     FileMenu,
+    /// Open the Selection menu (handled by the session).
+    SelectionMenu,
+    /// Multi-cursor: select the word, or add the next occurrence of the selection.
+    AddNextOccurrence,
+    /// Multi-cursor: drop the most recently added selection.
+    RemoveLastOccurrence,
+    /// Multi-cursor: select every occurrence of the selection.
+    SelectAllOccurrences,
+    /// Open the Workspace menu (handled by the session).
+    WorkspaceMenu,
+    /// Fuzzy search over all workspace files.
+    QuickOpen,
+    ToggleExplorer,
+    FocusExplorer,
+    NewWorkspace,
+    OpenWorkspace,
+    SaveWorkspace,
+    SaveWorkspaceAs,
+    AddFolder,
+    RemoveFolder,
+    ToggleGitignore,
+    CloseWorkspace,
     Quit,
 }
 
@@ -109,11 +141,12 @@ pub enum Group {
     Clipboard,
     Search,
     Views,
+    Workspace,
     View,
 }
 
 impl Group {
-    pub const ALL: [Group; 9] = [
+    pub const ALL: [Group; 10] = [
         Group::File,
         Group::Tabs,
         Group::Move,
@@ -122,6 +155,7 @@ impl Group {
         Group::Clipboard,
         Group::Search,
         Group::Views,
+        Group::Workspace,
         Group::View,
     ];
 
@@ -135,6 +169,7 @@ impl Group {
             Group::Clipboard => "Clipboard & undo",
             Group::Search => "Search & navigation",
             Group::Views => "Split views",
+            Group::Workspace => "Workspace",
             Group::View => "View & help",
         }
     }
@@ -171,6 +206,7 @@ impl Command {
             OpenPath => "Open file by typing a path",
             Save => "Save file",
             SaveAs => "Save file as",
+            RevertFile => "Revert file: discard all unsaved changes",
             CloseFile => "Close tab",
             NextTab => "Next tab",
             PrevTab => "Previous tab",
@@ -178,6 +214,12 @@ impl Command {
             FindNext => "Find next",
             FindPrev => "Find previous",
             GotoLine => "Go to line",
+            FindInFiles => "Find in files",
+            NextResult => "Next Find in Files result",
+            PrevResult => "Previous Find in Files result",
+            ToggleCase => "Search option: match case",
+            ToggleWholeWord => "Search option: whole word",
+            ToggleRegex => "Search option: regular expression",
             ScrollUp => "Scroll up",
             ScrollDown => "Scroll down",
             ZoomIn => "Increase font size",
@@ -191,6 +233,22 @@ impl Command {
             ToggleSplit => "Toggle one / two views",
             ResetSplit => "Center the divider between views",
             FileMenu => "Open the File menu",
+            SelectionMenu => "Open the Selection menu",
+            AddNextOccurrence => "Add next occurrence (multi-cursor)",
+            RemoveLastOccurrence => "Remove last added occurrence",
+            SelectAllOccurrences => "Select all occurrences (multi-cursor)",
+            WorkspaceMenu => "Open the Workspace menu",
+            QuickOpen => "Quick Open: find a file (name:line goes to a line)",
+            ToggleExplorer => "Show / hide the Explorer",
+            FocusExplorer => "Move cursor to the Explorer",
+            NewWorkspace => "New workspace",
+            OpenWorkspace => "Open workspace",
+            SaveWorkspace => "Save workspace",
+            SaveWorkspaceAs => "Save workspace as",
+            AddFolder => "Add folder to workspace",
+            RemoveFolder => "Remove folder from workspace",
+            ToggleGitignore => "Respect .gitignore",
+            CloseWorkspace => "Close workspace",
             Quit => "Quit",
         };
         s.to_string()
@@ -200,16 +258,26 @@ impl Command {
         use Command::*;
         match self {
             Move(_, false) => Group::Move,
-            Move(_, true) | SelectAll | SelectLine | Cancel => Group::Select,
+            Move(_, true)
+            | SelectAll
+            | SelectLine
+            | Cancel
+            | SelectionMenu
+            | AddNextOccurrence
+            | RemoveLastOccurrence
+            | SelectAllOccurrences => Group::Select,
             Newline | Indent | Outdent | Backspace | Delete | DeleteWordLeft | DeleteWordRight
             | DeleteLine | MoveLineUp | MoveLineDown | DuplicateLine => Group::Edit,
             Copy | Cut | Paste | Undo | Redo => Group::Clipboard,
-            NewFile | OpenFile | OpenPath | Save | SaveAs | CloseFile | Quit | FileMenu => {
-                Group::File
-            }
+            NewFile | OpenFile | OpenPath | Save | SaveAs | RevertFile | CloseFile | Quit
+            | FileMenu => Group::File,
             FocusOtherView | FocusLeft | FocusRight | ToggleSplit | ResetSplit => Group::Views,
+            WorkspaceMenu | QuickOpen | ToggleExplorer | FocusExplorer | NewWorkspace
+            | OpenWorkspace | SaveWorkspace | SaveWorkspaceAs | AddFolder | RemoveFolder
+            | ToggleGitignore | CloseWorkspace => Group::Workspace,
             NextTab | PrevTab | GotoTab(_) => Group::Tabs,
-            Find | FindNext | FindPrev | GotoLine => Group::Search,
+            Find | FindNext | FindPrev | GotoLine | FindInFiles | NextResult | PrevResult
+            | ToggleCase | ToggleWholeWord | ToggleRegex => Group::Search,
             ScrollUp | ScrollDown | ZoomIn | ZoomOut | ZoomReset | Help | ShowShortcuts => {
                 Group::View
             }

@@ -3,12 +3,21 @@
 use std::fs;
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
+/// An action that replaces or discards the open tabs; it runs once unsaved work is dealt with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingAction {
+    Quit,
+    OpenWorkspace(PathBuf),
+    CloseWorkspace,
+}
+
 /// What happens once a Save As prompt finishes successfully.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AfterSave {
     Nothing,
     CloseDoc,
-    ContinueQuit,
+    /// Keep saving the remaining unsaved files, then run the action.
+    Continue(PendingAction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +34,16 @@ pub enum PromptKind {
         pane: usize,
         index: usize,
     },
-    /// Unsaved changes in some documents: (s)ave all / (d)iscard / (c)ancel.
-    ConfirmQuit,
+    /// Unsaved files before `PendingAction`: (s)ave all / (d)iscard / (c)ancel.
+    ConfirmDiscard(PendingAction),
+    /// Workspace was never saved before `PendingAction`: (y)es / (n)o / (c)ancel.
+    ConfirmSaveWorkspace(PendingAction),
+    /// Name for a new workspace.
+    WorkspaceName,
+    /// Where to save the workspace file; then optionally continue with an action.
+    SaveWorkspaceAs(Option<PendingAction>),
+    /// Remove this folder from the workspace? (y)es / (n)o.
+    ConfirmRemoveFolder(PathBuf),
 }
 
 #[derive(Debug)]
@@ -50,7 +67,10 @@ impl Minibuffer {
     pub fn is_confirm(&self) -> bool {
         matches!(
             self.kind,
-            PromptKind::ConfirmClose { .. } | PromptKind::ConfirmQuit
+            PromptKind::ConfirmClose { .. }
+                | PromptKind::ConfirmDiscard(_)
+                | PromptKind::ConfirmSaveWorkspace(_)
+                | PromptKind::ConfirmRemoveFolder(_)
         )
     }
 
@@ -63,8 +83,21 @@ impl Minibuffer {
             PromptKind::ConfirmClose { .. } => {
                 format!("Save changes to {doc_title}? (y)es / (n)o / (c)ancel ")
             }
-            PromptKind::ConfirmQuit => {
-                "Unsaved changes. (s)ave all / (d)iscard and quit / (c)ancel ".into()
+            PromptKind::ConfirmDiscard(action) => {
+                let what = match action {
+                    PendingAction::Quit => "quit",
+                    PendingAction::OpenWorkspace(_) => "open the workspace",
+                    PendingAction::CloseWorkspace => "close the workspace",
+                };
+                format!("Unsaved changes. (s)ave all / (d)iscard and {what} / (c)ancel ")
+            }
+            PromptKind::ConfirmSaveWorkspace(_) => {
+                "Save the workspace first? (y)es / (n)o / (c)ancel ".into()
+            }
+            PromptKind::WorkspaceName => "New workspace name: ".into(),
+            PromptKind::SaveWorkspaceAs(_) => "Save workspace as: ".into(),
+            PromptKind::ConfirmRemoveFolder(p) => {
+                format!("Remove {} from the workspace? (y)es / (n)o ", p.display())
             }
         }
     }

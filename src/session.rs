@@ -11,7 +11,10 @@ use crate::editor::Editor;
 use crate::keymap;
 use crate::render::{Renderer, frame};
 use crate::theme;
-use crate::ui::layout::{FILE_MENU, Layout, file_menu_layout, tab_rects, toolbar_buttons};
+use crate::ui::explorer::{MAX_WIDTH_COLS, MIN_WIDTH_COLS};
+use crate::ui::find_panel::Field;
+use crate::ui::layout::{Layout, tab_rects, toolbar_buttons};
+use crate::ui::menu::{MenuId, MenuLayout, menu_entries, menu_layout, next_item};
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -27,6 +30,8 @@ pub struct Session {
     dragging: bool,
     /// Left button held on the line between the views.
     dragging_divider: bool,
+    /// Left button held on the Explorer's right edge.
+    dragging_sidebar: bool,
     last_click: Option<(Instant, (f32, f32))>,
     click_count: u32,
     /// Sub-line remainder of pixel-precise (touchpad) scrolling.
@@ -46,6 +51,7 @@ impl Session {
             mouse: (0.0, 0.0),
             dragging: false,
             dragging_divider: false,
+            dragging_sidebar: false,
             last_click: None,
             click_count: 0,
             scroll_accum: (0.0, 0.0),
@@ -62,18 +68,22 @@ impl Session {
         self.editor.should_quit
     }
 
+    /// Window title: file, workspace, app name.
     pub fn title(&self) -> String {
-        match self.editor.pane().doc() {
-            Some(doc) => {
-                let dirty = if doc.is_dirty() { " ●" } else { "" };
-                format!("{}{dirty} - JMX", doc.title())
-            }
-            None => "JMX".to_string(),
+        let mut parts = Vec::new();
+        if let Some(doc) = self.editor.pane().doc() {
+            let dirty = if doc.is_dirty() { " ●" } else { "" };
+            parts.push(format!("{}{dirty}", doc.title()));
         }
+        if let Some(ws) = &self.editor.workspace {
+            parts.push(ws.name.clone());
+        }
+        parts.push("JMX".to_string());
+        parts.join(" - ")
     }
 
-    pub fn menu_open(&self) -> bool {
-        self.ui.menu_open
+    pub fn open_menu_id(&self) -> Option<MenuId> {
+        self.ui.menu
     }
 
     /// Recompute layout from the target size and font metrics; tell each view its size.
@@ -98,9 +108,16 @@ impl Session {
         if let Some(p) = &layout.picker {
             self.editor.picker_rows = p.rows;
         }
+        if let Some(f) = &layout.find {
+            self.editor.find.visible_rows = f.rows;
+        }
+        if let Some(sb) = &layout.sidebar {
+            self.editor.explorer.visible_rows = sb.rows;
+        }
         self.layout = Some(layout);
-        // The divider may have moved under (or away from) a still mouse, e.g. after Ctrl+F6.
+        // Edges may have moved under (or away from) a still mouse, e.g. after Ctrl+F6.
         self.ui.divider_active = self.dragging_divider || self.over_divider();
+        self.ui.sidebar_edge_active = self.dragging_sidebar || self.over_sidebar_edge();
     }
 
     /// Render one frame. Returns false if it was skipped and should be retried.
@@ -126,21 +143,24 @@ impl Session {
     // ---------------------------------------------------------------- keyboard
 
     /// A key press: menu navigation, then shortcut lookup, otherwise typed text.
-    pub fn key(&mut self, key: &Key, text: Option<&str>) {
-        let cmd = keymap::lookup(self.modifiers, key);
+    /// A key press: `key` as typed, `base` the same key without modifiers (layout-independent
+    /// shortcuts are matched on it first).
+    pub fn key(&mut self, key: &Key, base: &Key, text: Option<&str>) {
+        let cmd =
+            keymap::lookup(self.modifiers, base).or_else(|| keymap::lookup(self.modifiers, key));
         log::trace!(
             "key {key:?} mods {:?} text {text:?} -> {cmd:?}",
             self.modifiers
         );
-        if self.ui.menu_open {
+        if self.ui.menu.is_some() {
             if self.menu_key(key, cmd) {
                 return;
             }
             // Any other key closes the menu and then does its normal job.
             self.close_menu();
         }
-        if cmd == Some(Command::FileMenu) {
-            self.open_menu(true);
+        if let Some(menu) = cmd.and_then(MenuId::for_command) {
+            self.open_menu(menu, true);
             return;
         }
         if let Some(cmd) = cmd {
@@ -155,43 +175,84 @@ impl Session {
         }
     }
 
-    // ---------------------------------------------------------------- menu
+    // ---------------------------------------------------------------- menus
 
-    /// Open the File menu; from the keyboard the first item is highlighted.
-    fn open_menu(&mut self, keyboard: bool) {
-        self.ui.menu_open = true;
-        self.ui.menu_hover = keyboard.then(|| next_menu_item(None, 1));
+    /// Open a menu; from the keyboard the first item is highlighted.
+    fn open_menu(&mut self, menu: MenuId, keyboard: bool) {
+        self.ui.menu = Some(menu);
+        self.ui.menu_hover = if keyboard {
+            next_item(&menu_entries(menu, &self.editor), None, 1)
+        } else {
+            None
+        };
     }
 
     fn close_menu(&mut self) {
-        self.ui.menu_open = false;
+        self.ui.menu = None;
         self.ui.menu_hover = None;
     }
 
     fn run_menu_item(&mut self, index: usize) {
+        let Some(menu) = self.ui.menu else {
+            return;
+        };
         self.close_menu();
-        if let Some(Some((_, cmd))) = FILE_MENU.get(index) {
+        let entries = menu_entries(menu, &self.editor);
+        if let Some(cmd) = entries
+            .get(index)
+            .filter(|e| e.selectable())
+            .and_then(|e| e.cmd)
+        {
             log::debug!("menu item {cmd:?}");
-            self.editor.execute(*cmd);
+            self.editor.execute(cmd);
         }
     }
 
-    /// Keys while the menu is open. Returns false if the key should close it and run normally.
+    /// The open menu's geometry, under its toolbar button.
+    fn menu_geometry(&self) -> Option<MenuLayout> {
+        let menu = self.ui.menu?;
+        let layout = self.layout.as_ref()?;
+        let anchor = toolbar_buttons(layout, &self.editor)
+            .into_iter()
+            .find(|b| MenuId::for_command(b.cmd) == Some(menu))?
+            .rect;
+        Some(menu_layout(layout, &self.editor, menu, anchor))
+    }
+
+    /// Keys while a menu is open. Returns false if the key should close it and run normally.
     fn menu_key(&mut self, key: &Key, cmd: Option<Command>) -> bool {
+        let Some(menu) = self.ui.menu else {
+            return false;
+        };
+        let entries = menu_entries(menu, &self.editor);
         match key {
             Key::Named(NamedKey::ArrowDown) => {
-                self.ui.menu_hover = Some(next_menu_item(self.ui.menu_hover, 1));
+                self.ui.menu_hover = next_item(&entries, self.ui.menu_hover, 1);
             }
             Key::Named(NamedKey::ArrowUp) => {
-                self.ui.menu_hover = Some(next_menu_item(self.ui.menu_hover, -1));
+                self.ui.menu_hover = next_item(&entries, self.ui.menu_hover, -1);
+            }
+            // Left/Right move between the menus of the bar.
+            Key::Named(k @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) => {
+                let all = MenuId::ALL;
+                let i = all.iter().position(|&m| m == menu).unwrap_or(0);
+                let step = if *k == NamedKey::ArrowRight {
+                    1
+                } else {
+                    all.len() - 1
+                };
+                self.open_menu(all[(i + step) % all.len()], true);
             }
             Key::Named(NamedKey::Enter) => match self.ui.menu_hover {
                 Some(i) => self.run_menu_item(i),
                 None => self.close_menu(),
             },
             Key::Named(NamedKey::Escape) => self.close_menu(),
-            _ if cmd == Some(Command::FileMenu) => self.close_menu(),
-            _ => return false,
+            _ => match cmd.and_then(MenuId::for_command) {
+                Some(m) if m == menu => self.close_menu(),
+                Some(m) => self.open_menu(m, true),
+                None => return false,
+            },
         }
         true
     }
@@ -205,9 +266,16 @@ impl Session {
         if !layout.toolbar.contains(x, y) {
             return None;
         }
-        toolbar_buttons(layout)
+        toolbar_buttons(layout, &self.editor)
             .iter()
             .position(|b| b.rect.contains(x, y))
+    }
+
+    fn button_cmd(&self, index: usize) -> Option<Command> {
+        let layout = self.layout.as_ref()?;
+        toolbar_buttons(layout, &self.editor)
+            .get(index)
+            .map(|b| b.cmd)
     }
 
     fn over_divider(&self) -> bool {
@@ -216,6 +284,14 @@ impl Session {
             .as_ref()
             .and_then(|l| l.divider)
             .is_some_and(|d| d.contains(x, y))
+    }
+
+    fn over_sidebar_edge(&self) -> bool {
+        let (x, y) = self.mouse;
+        self.layout
+            .as_ref()
+            .and_then(|l| l.sidebar.as_ref())
+            .is_some_and(|s| s.edge.contains(x, y))
     }
 
     /// Count consecutive clicks at (about) the same spot.
@@ -243,19 +319,50 @@ impl Session {
         let (x, y) = self.mouse;
         log::trace!("mouse press at {x},{y}");
 
-        // An open menu takes the click: run the item, or just close the menu.
-        if self.ui.menu_open {
-            let menu = file_menu_layout(&layout);
-            match menu.item_at(x, y) {
-                Some(i) => self.run_menu_item(i),
-                None if menu.panel.contains(x, y) => {}
-                None => self.close_menu(),
+        // An open menu takes the click: run the item, switch menus, or just close.
+        if let Some(menu) = self.menu_geometry() {
+            if let Some(i) = menu.item_at(x, y) {
+                self.run_menu_item(i);
+            } else if menu.panel.contains(x, y) {
+                // Separator or disabled item: keep the menu open.
+            } else if let Some(other) = self
+                .button_at_mouse()
+                .and_then(|i| self.button_cmd(i))
+                .and_then(MenuId::for_command)
+                .filter(|m| Some(*m) != self.ui.menu)
+            {
+                self.open_menu(other, false);
+            } else {
+                self.close_menu();
             }
             return;
         }
         // Toolbar buttons act on release, like ordinary buttons.
         if layout.toolbar.contains(x, y) {
             self.ui.pressed_button = self.button_at_mouse();
+            return;
+        }
+        if let Some(fl) = &layout.find {
+            if fl.panel.contains(x, y) {
+                if let Some(chip) = fl.chip_at(x, y) {
+                    let cmd = [
+                        Command::ToggleCase,
+                        Command::ToggleWholeWord,
+                        Command::ToggleRegex,
+                    ][chip];
+                    self.editor.execute(cmd);
+                } else if fl.query.contains(x, y) {
+                    self.editor.find_focus_field(Field::Query);
+                } else if fl.include.contains(x, y) {
+                    self.editor.find_focus_field(Field::Include);
+                } else if let Some(row) = fl.row_at(x, y) {
+                    let double = self.register_click() >= 2;
+                    let index = self.editor.find.scroll + row;
+                    self.editor.find_click(index, double);
+                }
+            } else {
+                self.editor.find.open = false;
+            }
             return;
         }
         if let Some(pl) = &layout.picker {
@@ -270,6 +377,37 @@ impl Session {
             }
             return;
         }
+        if let Some(sb) = &layout.sidebar {
+            if sb.edge.contains(x, y) {
+                self.dragging_sidebar = true;
+                self.ui.sidebar_edge_active = true;
+                return;
+            }
+            if sb.area.contains(x, y) {
+                if sb.add_button.is_some_and(|b| b.contains(x, y)) {
+                    self.editor.execute(Command::AddFolder);
+                } else if let Some(row) = sb.row_at(x, y) {
+                    let index = self.editor.explorer.scroll + row;
+                    if index < self.editor.explorer.rows.len() {
+                        self.editor.explorer_click(index);
+                    } else {
+                        self.editor.explorer.focused = true;
+                    }
+                } else if self
+                    .editor
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|w| w.folders.is_empty())
+                    && sb.list.contains(x, y)
+                {
+                    // The "Add Folder…" hint in an empty workspace.
+                    self.editor.execute(Command::AddFolder);
+                } else {
+                    self.editor.explorer.focused = true;
+                }
+                return;
+            }
+        }
         if layout.divider.is_some_and(|d| d.contains(x, y)) {
             if self.register_click() >= 2 {
                 self.editor.split_ratio = 0.5;
@@ -282,6 +420,7 @@ impl Session {
         let Some(pl) = layout.pane_at(x, y) else {
             return;
         };
+        self.editor.explorer.focused = false;
         self.editor.focus_view(pl.pane);
         if pl.tab_bar.contains(x, y) {
             if let Some(t) = tab_rects(&self.editor, pl, layout.scale)
@@ -310,16 +449,18 @@ impl Session {
             self.dragging_divider = false;
             self.ui.divider_active = self.over_divider();
         }
+        if self.dragging_sidebar {
+            self.dragging_sidebar = false;
+            self.ui.sidebar_edge_active = self.over_sidebar_edge();
+        }
         if let Some(i) = self.ui.pressed_button.take()
             && self.button_at_mouse() == Some(i)
-            && let Some(layout) = &self.layout
-            && let Some(btn) = toolbar_buttons(layout).into_iter().nth(i)
+            && let Some(cmd) = self.button_cmd(i)
         {
-            log::debug!("toolbar button {:?}", btn.cmd);
-            if btn.cmd == Command::FileMenu {
-                self.open_menu(false);
-            } else {
-                self.editor.execute(btn.cmd);
+            log::debug!("toolbar button {cmd:?}");
+            match MenuId::for_command(cmd) {
+                Some(menu) => self.open_menu(menu, false),
+                None => self.editor.execute(cmd),
             }
         }
     }
@@ -329,14 +470,23 @@ impl Session {
         self.mouse = (x, y);
         let before = self.ui;
         self.ui.hover_button = self.button_at_mouse();
-        if self.ui.menu_open
-            && let Some(layout) = &self.layout
-        {
-            let menu = file_menu_layout(layout);
-            if let Some(i) = menu.item_at(x, y) {
-                self.ui.menu_hover = Some(i);
-            } else if !menu.panel.contains(x, y) {
-                self.ui.menu_hover = None;
+        if self.ui.menu.is_some() {
+            // Sliding onto the other menu button switches menus, like a normal menu bar.
+            if let Some(other) = self
+                .ui
+                .hover_button
+                .and_then(|i| self.button_cmd(i))
+                .and_then(MenuId::for_command)
+                .filter(|m| Some(*m) != self.ui.menu)
+            {
+                self.open_menu(other, false);
+            }
+            if let Some(menu) = self.menu_geometry() {
+                if let Some(i) = menu.item_at(x, y) {
+                    self.ui.menu_hover = Some(i);
+                } else if !menu.panel.contains(x, y) {
+                    self.ui.menu_hover = None;
+                }
             }
         }
         let mut redraw = false;
@@ -348,6 +498,16 @@ impl Session {
             }
         } else {
             self.ui.divider_active = self.over_divider();
+        }
+        if self.dragging_sidebar {
+            if let Some(layout) = &self.layout {
+                self.editor.explorer.width_cols = layout
+                    .sidebar_cols_at(x)
+                    .clamp(MIN_WIDTH_COLS, MAX_WIDTH_COLS);
+                redraw = true;
+            }
+        } else {
+            self.ui.sidebar_edge_active = self.over_sidebar_edge();
         }
         // A text drag stays in the view where it started (the focused one).
         if self.dragging
@@ -368,12 +528,16 @@ impl Session {
         if !self.dragging_divider {
             self.ui.divider_active = false;
         }
+        if !self.dragging_sidebar {
+            self.ui.sidebar_edge_active = false;
+        }
         self.ui != before
     }
 
     pub fn focus_lost(&mut self) {
         self.dragging = false;
         self.dragging_divider = false;
+        self.dragging_sidebar = false;
     }
 
     /// Mouse cursor shape for the current position.
@@ -382,8 +546,10 @@ impl Session {
             return CursorIcon::Default;
         };
         let (x, y) = self.mouse;
-        if self.ui.menu_open && file_menu_layout(layout).panel.contains(x, y) {
-            return if self.ui.menu_hover.is_some() {
+        if let Some(menu) = self.menu_geometry()
+            && menu.panel.contains(x, y)
+        {
+            return if menu.item_at(x, y).is_some() {
                 CursorIcon::Pointer
             } else {
                 CursorIcon::Default
@@ -392,33 +558,77 @@ impl Session {
         if self.ui.hover_button.is_some() {
             return CursorIcon::Pointer;
         }
-        if self.dragging_divider || self.over_divider() {
+        if self.dragging_divider
+            || self.over_divider()
+            || self.dragging_sidebar
+            || self.over_sidebar_edge()
+        {
             return CursorIcon::ColResize;
+        }
+        if let Some(fl) = &layout.find
+            && fl.panel.contains(x, y)
+        {
+            let over_row = fl
+                .row_at(x, y)
+                .is_some_and(|r| self.editor.find.scroll + r < self.editor.find.rows.len());
+            return if fl.chip_at(x, y).is_some() || over_row {
+                CursorIcon::Pointer
+            } else if fl.query.contains(x, y) || fl.include.contains(x, y) {
+                CursorIcon::Text
+            } else {
+                CursorIcon::Default
+            };
         }
         let over_picker = layout
             .picker
             .as_ref()
             .is_some_and(|p| p.panel.contains(x, y));
+        if over_picker {
+            return CursorIcon::Default;
+        }
+        if let Some(sb) = &layout.sidebar
+            && sb.area.contains(x, y)
+        {
+            let over_row = sb
+                .row_at(x, y)
+                .is_some_and(|r| self.editor.explorer.scroll + r < self.editor.explorer.rows.len());
+            let over_button = sb.add_button.is_some_and(|b| b.contains(x, y));
+            return if over_row || over_button {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            };
+        }
         let over_text = layout
             .pane_at(x, y)
             .is_some_and(|pl| pl.text.contains(x, y) && self.editor.panes[pl.pane].doc().is_some());
-        if over_text && !over_picker {
+        if over_text {
             CursorIcon::Text
         } else {
             CursorIcon::Default
         }
     }
 
-    /// Wheel in lines (mouse wheel notches already multiplied). Scrolls the view under the mouse.
+    /// Wheel in lines (mouse wheel notches already multiplied). Scrolls what is under the mouse.
     pub fn wheel_lines(&mut self, mut dx: f32, mut dy: f32) {
+        if self.editor.find.open {
+            self.editor.find.scroll_by(-dy as isize);
+            return;
+        }
         if self.editor.picker.is_some() {
             self.editor.picker_scroll(-dy as isize);
+            return;
+        }
+        let (x, y) = self.mouse;
+        if let Some(sb) = self.layout.as_ref().and_then(|l| l.sidebar.as_ref())
+            && sb.area.contains(x, y)
+        {
+            self.editor.explorer.scroll_by(-dy as isize);
             return;
         }
         if self.modifiers.shift_key() {
             std::mem::swap(&mut dx, &mut dy);
         }
-        let (x, y) = self.mouse;
         let pane = self
             .layout
             .as_ref()
@@ -442,32 +652,5 @@ impl Session {
         self.scroll_accum.0 -= d.0;
         self.scroll_accum.1 -= d.1;
         self.wheel_lines(d.0, d.1);
-    }
-}
-
-/// Next selectable File menu row from `from` in direction `dir` (wrapping, skipping separators).
-fn next_menu_item(from: Option<usize>, dir: isize) -> usize {
-    let n = FILE_MENU.len() as isize;
-    let mut i = from.map_or(if dir > 0 { -1 } else { n }, |i| i as isize);
-    for _ in 0..n {
-        i = (i + dir).rem_euclid(n);
-        if FILE_MENU[i as usize].is_some() {
-            return i as usize;
-        }
-    }
-    0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn menu_navigation_skips_separator() {
-        assert_eq!(next_menu_item(None, 1), 0);
-        assert_eq!(next_menu_item(None, -1), FILE_MENU.len() - 1);
-        assert_eq!(next_menu_item(Some(5), 1), 7); // 6 is the separator
-        assert_eq!(next_menu_item(Some(7), -1), 5);
-        assert_eq!(next_menu_item(Some(7), 1), 0);
     }
 }
