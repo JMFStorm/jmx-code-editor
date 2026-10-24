@@ -145,9 +145,24 @@ pub fn parse(json: &str, root: &Path) -> Result<Report, String> {
     Ok(out)
 }
 
+/// How long one file's lint may take.
+const FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a whole project's lint may take.
+const ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// Run ESLint and parse its report. Exit codes 0 and 1 (problems found) are both success.
 fn run_eslint(eslint: &Path, root: &Path, args: &[&OsStr], stdin: &str) -> Result<Report, String> {
-    let out = process::run(eslint, args, root, stdin)?;
+    run_eslint_for(eslint, root, args, stdin, FILE_TIMEOUT)
+}
+
+fn run_eslint_for(
+    eslint: &Path,
+    root: &Path,
+    args: &[&OsStr],
+    stdin: &str,
+    timeout: std::time::Duration,
+) -> Result<Report, String> {
+    let out = process::run_with_timeout(eslint, args, root, stdin, timeout)?;
     match out.code {
         Some(0 | 1) => parse(&out.stdout, root),
         _ => Err(process::first_error_line("ESLint", &out.stderr)
@@ -226,7 +241,8 @@ impl LintJob {
         let r = root.clone();
         Self::spawn(Scope::Root(root), 0, move || {
             let args: [&OsStr; 3] = ["--format".as_ref(), "json".as_ref(), ".".as_ref()];
-            run_eslint(&eslint, &r, &args, "")
+            // A whole monorepo takes minutes, not seconds.
+            run_eslint_for(&eslint, &r, &args, "", ROOT_TIMEOUT)
         })
     }
 

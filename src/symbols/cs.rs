@@ -301,6 +301,9 @@ fn doc_before(src: &str, toks: &[Token], start: usize) -> Doc {
         return Doc::default();
     }
     run.reverse();
+    if super::skipping_docs() {
+        return super::doc_marker();
+    }
     parse_xml_doc(&run.join("\n"))
 }
 
@@ -347,7 +350,7 @@ pub fn parse_xml_doc(xml: &str) -> Doc {
         None if !xml.contains('<') => text(xml),
         None => String::new(),
     };
-    Doc {
+    let doc = crate::symbols::DocData {
         summary,
         params: PARAM
             .captures_iter(xml)
@@ -376,6 +379,11 @@ pub fn parse_xml_doc(xml: &str) -> Doc {
             .collect(),
         ty: String::new(),
         ..Default::default()
+    };
+    if doc.is_empty() && doc.remarks.is_empty() && doc.exceptions.is_empty() {
+        Doc::default()
+    } else {
+        doc.into()
     }
 }
 

@@ -432,6 +432,9 @@ pub(crate) fn doc_before(src: &str, toks: &[Token], start: usize) -> Doc {
     if !gap[close..].trim().is_empty() {
         return Doc::default();
     }
+    if super::skipping_docs() {
+        return super::doc_marker();
+    }
     parse_jsdoc(&gap[open..close])
 }
 
@@ -460,10 +463,11 @@ pub fn parse_jsdoc(comment: &str) -> Doc {
             summary.push(l);
         }
     }
-    let mut doc = Doc {
-        summary: inline_tags(&one_line(&summary.join("\n"))),
-        ..Default::default()
-    };
+    let mut doc = Doc::default();
+    let text = inline_tags(&one_line(&summary.join("\n")));
+    if !text.is_empty() {
+        doc.summary = text;
+    }
     for tag in tags {
         let (name, rest) = tag.split_once(char::is_whitespace).unwrap_or((&tag, ""));
         match name {

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::selection::Selection;
@@ -26,12 +27,22 @@ pub enum EditKind {
 pub struct Transaction {
     id: u64,
     kind: EditKind,
-    pub changes: Vec<Change>,
+    /// Shared: moving a step between the undo and redo stacks doesn't copy its text.
+    pub changes: Arc<Vec<Change>>,
     pub before: Selection,
     pub after: Selection,
 }
 
 const COALESCE_WINDOW: Duration = Duration::from_millis(1000);
+/// Undo steps are dropped, oldest first, when their text exceeds this.
+const UNDO_BYTES: usize = 64 << 20;
+
+fn bytes(t: &Transaction) -> usize {
+    t.changes
+        .iter()
+        .map(|c| c.removed.len() + c.inserted.len() + 32)
+        .sum()
+}
 
 #[derive(Debug)]
 pub struct History {
@@ -42,6 +53,8 @@ pub struct History {
     saved_id: u64,
     last_edit: Option<Instant>,
     coalesce: bool,
+    /// Text held by the undo stack.
+    undo_bytes: usize,
 }
 
 impl Default for History {
@@ -53,6 +66,7 @@ impl Default for History {
             saved_id: 0,
             last_edit: None,
             coalesce: false,
+            undo_bytes: 0,
         }
     }
 }
@@ -100,8 +114,12 @@ impl History {
             && let Some(top) = self.undo.last_mut()
             && top.kind == kind
             && top.changes.len() == 1
-            && merge(&mut top.changes[0], &changes[0])
+            && let mut merged = top.changes[0].clone()
+            && merge(&mut merged, &changes[0])
         {
+            self.undo_bytes -= bytes(top);
+            Arc::make_mut(&mut top.changes)[0] = merged;
+            self.undo_bytes += bytes(top);
             top.after = after;
             return;
         }
@@ -111,15 +129,31 @@ impl History {
         self.undo.push(Transaction {
             id,
             kind,
-            changes,
+            changes: Arc::new(changes),
             before,
             after,
         });
+        self.undo_bytes += bytes(self.undo.last().expect("just pushed"));
         self.coalesce = kind != EditKind::Other;
+        self.trim();
+    }
+
+    /// Drop the oldest steps while the stack holds more than `UNDO_BYTES` (the newest step
+    /// always stays).
+    fn trim(&mut self) {
+        let mut drop = 0;
+        while self.undo_bytes > UNDO_BYTES && drop + 1 < self.undo.len() {
+            self.undo_bytes -= bytes(&self.undo[drop]);
+            drop += 1;
+        }
+        if drop > 0 {
+            self.undo.drain(..drop);
+        }
     }
 
     pub fn pop_undo(&mut self) -> Option<Transaction> {
         let t = self.undo.pop()?;
+        self.undo_bytes -= bytes(&t);
         self.redo.push(t.clone());
         self.break_coalescing();
         Some(t)
@@ -127,8 +161,10 @@ impl History {
 
     pub fn pop_redo(&mut self) -> Option<Transaction> {
         let t = self.redo.pop()?;
+        self.undo_bytes += bytes(&t);
         self.undo.push(t.clone());
         self.break_coalescing();
+        self.trim();
         Some(t)
     }
 }

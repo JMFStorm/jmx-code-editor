@@ -1,0 +1,9 @@
+wait 300
+perf ready
+key ctrl+p
+type sharedformatjs:8:17
+key enter
+key shift+f12
+wait 120
+perf references
+state

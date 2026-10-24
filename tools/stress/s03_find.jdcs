@@ -1,0 +1,6 @@
+wait 300
+perf ready
+key ctrl+shift+f
+typef result
+wait 120
+perf search-done

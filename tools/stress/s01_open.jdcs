@@ -1,0 +1,3 @@
+# Open the workspace and wait for every background scan.
+wait 300
+perf ready

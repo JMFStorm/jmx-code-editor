@@ -189,14 +189,32 @@ impl TestTree {
     /// Merge what was found in `file`: new tests appear (not run), missing ones go, and kept
     /// ones keep their last result (which only shows while their text is unchanged).
     pub fn replace_file(&mut self, file: &Path, found: FileTests) {
+        self.replace_files(vec![(file.to_path_buf(), found)]);
+    }
+
+    /// `replace_file` for many files at once (a workspace scan): one pass over the tests and
+    /// one sort, instead of one of each per file.
+    pub fn replace_files(&mut self, files: Vec<(PathBuf, FileTests)>) {
+        let wanted: std::collections::HashSet<&PathBuf> = files.iter().map(|(p, _)| p).collect();
+        let mut old: HashMap<PathBuf, Vec<TestCase>> = HashMap::new();
+        for t in std::mem::take(&mut self.tests) {
+            if wanted.contains(&t.file) {
+                old.entry(t.file.clone()).or_default().push(t);
+            } else {
+                self.tests.push(t);
+            }
+        }
+        for (file, found) in files {
+            let prev = old.remove(&file).unwrap_or_default();
+            self.merge_file(&file, found, prev);
+        }
+        self.sort();
+    }
+
+    fn merge_file(&mut self, file: &Path, found: FileTests, prev: Vec<TestCase>) {
         let runnable_stories = self.project_of(file).is_some_and(|p| p.stories_runnable);
-        let mut old: HashMap<String, TestCase> = self
-            .tests
-            .iter()
-            .filter(|t| t.file == file)
-            .map(|t| (t.id.clone(), t.clone()))
-            .collect();
-        self.tests.retain(|t| t.file != file);
+        let mut old: HashMap<String, TestCase> =
+            prev.into_iter().map(|t| (t.id.clone(), t)).collect();
         let mut seen: HashMap<String, usize> = HashMap::new();
         for f in found.tests {
             let base = match &f.full_name {
@@ -228,7 +246,6 @@ impl TestTree {
         } else {
             self.suites.insert(file.to_path_buf(), found.suites);
         }
-        self.sort();
     }
 
     pub fn remove_file(&mut self, file: &Path) {
@@ -244,9 +261,9 @@ impl TestTree {
                 .position(|p| f.starts_with(&p.root))
                 .unwrap_or(usize::MAX)
         };
-        self.tests.sort_by(|a, b| {
-            (rank(&a.file), &a.file, a.found.line).cmp(&(rank(&b.file), &b.file, b.found.line))
-        });
+        // Keys computed once per test, not on every comparison.
+        self.tests
+            .sort_by_cached_key(|t| (rank(&t.file), t.file.clone(), t.found.line));
     }
 
     /// (passed, failed, not run, running).

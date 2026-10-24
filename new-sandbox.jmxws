@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "name": "new-sandbox",
+  "folders": [
+    "sandbox/dotnet-inventory",
+    "sandbox/vue-dashboard"
+  ],
+  "respect_gitignore": true,
+  "state": {
+    "split": true,
+    "split_ratio": 0.5228673,
+    "focus": 0,
+    "font_size": 15.0,
+    "explorer": {
+      "visible": true,
+      "width_cols": 32.0,
+      "expanded": [
+        "sandbox/dotnet-inventory",
+        "sandbox/dotnet-inventory/src",
+        "sandbox/dotnet-inventory/src/Inventory.Api",
+        "sandbox/dotnet-inventory/src/Inventory.Api/Services"
+      ]
+    },
+    "panes": [
+      {
+        "active": 3,
+        "tabs": [
+          {
+            "kind": "file",
+            "path": "sandbox/vue-dashboard/src/components/SalesChart.vue",
+            "anchor": 0,
+            "head": 0,
+            "top_line": 0,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/vue-dashboard/src/main.js",
+            "anchor": 264,
+            "head": 264,
+            "top_line": 0,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Services/ProductService.cs",
+            "anchor": 1232,
+            "head": 1232,
+            "top_line": 21,
+            "left_col": 0,
+            "unsaved": null
+          },
+          {
+            "kind": "file",
+            "path": "sandbox/dotnet-inventory/src/Inventory.Api/Services/IProductService.cs",
+            "anchor": 1722,
+            "head": 1722,
+            "top_line": 0,
+            "left_col": 0,
+            "unsaved": null
+          }
+        ]
+      },
+      {
+        "active": 4,
+        "tabs": [
+          {
+            "kind": "help"
+          },
+          {
+            "kind": "shortcuts"
+          },
+          {
+            "kind": "problems"
+          },
+          {
+            "kind": "tests"
+          }
+        ]
+      }
+    ],
+    "search": {
+      "query": "",
+      "include": "",
+      "options": {
+        "case_sensitive": false,
+        "whole_word": false,
+        "regex": false
+      }
+    },
+    "problem_filter": {
+      "errors": true,
+      "warnings": true,
+      "infos": true
+    }
+  }
+}

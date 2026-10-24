@@ -22,6 +22,14 @@ pub struct App {
     focused: bool,
     blink_start: Instant,
     cursor_icon: CursorIcon,
+    /// The window is hidden (minimized, covered): no frames until it shows again.
+    occluded: bool,
+    /// A frame could not be presented: try again at this time (not in a busy loop).
+    retry_at: Option<Instant>,
+    /// The cursor blink phase of the last frame drawn.
+    drawn_phase: bool,
+    /// The window title last set.
+    title: String,
 }
 
 impl App {
@@ -31,6 +39,10 @@ impl App {
             window: None,
             renderer: None,
             focused: true,
+            occluded: false,
+            retry_at: None,
+            drawn_phase: true,
+            title: String::new(),
             blink_start: Instant::now(),
             cursor_icon: CursorIcon::Default,
         }
@@ -62,8 +74,12 @@ impl App {
         if let Some(r) = &mut self.renderer {
             self.session.relayout(r);
         }
+        let title = self.session.title();
         if let Some(w) = &self.window {
-            w.set_title(&self.session.title());
+            if title != self.title {
+                w.set_title(&title);
+                self.title = title;
+            }
             w.request_redraw();
         }
     }
@@ -106,6 +122,9 @@ impl App {
         if let Some(t) = self.session.editor.next_deadline() {
             next = Some(next.map_or(t, |n| n.min(t)));
         }
+        if let Some(t) = self.retry_at {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
         next
     }
 }
@@ -144,10 +163,21 @@ impl ApplicationHandler for App {
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
-            self.session.editor.expire_message();
-            self.session.editor.poll_jobs();
-            self.session.tick();
-            self.request_redraw();
+            // Redraw only when something visible changed: a message expired, background work
+            // reported, a hover popup is due, the cursor blinked, or a frame must be retried.
+            let mut changed = self.session.editor.expire_message();
+            changed |= self.session.editor.poll_jobs();
+            changed |= self.session.tick();
+            if self.focused && self.cursor_phase_on() != self.drawn_phase {
+                changed = true;
+            }
+            if self.retry_at.is_some_and(|t| Instant::now() >= t) {
+                self.retry_at = None;
+                changed = true;
+            }
+            if changed {
+                self.request_redraw();
+            }
         }
     }
 
@@ -172,6 +202,12 @@ impl ApplicationHandler for App {
                 self.session.editor.ensure_cursor_visible();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.after_input(event_loop),
+            WindowEvent::Occluded(hidden) => {
+                self.occluded = hidden;
+                if !hidden {
+                    self.request_redraw();
+                }
+            }
             WindowEvent::Focused(f) => {
                 self.focused = f;
                 if !f {
@@ -225,12 +261,20 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                if self.occluded {
+                    return;
+                }
                 self.sync_size();
                 let cursor_on = !self.focused || self.cursor_phase_on();
-                if let Some(r) = &mut self.renderer
-                    && !self.session.draw(r, cursor_on)
-                {
-                    self.request_redraw();
+                self.drawn_phase = cursor_on;
+                if let Some(r) = &mut self.renderer {
+                    if !self.session.draw(r, cursor_on) {
+                        // Not presented (surface lost or busy): try again shortly.
+                        self.retry_at = Some(Instant::now() + Duration::from_millis(50));
+                    } else if self.session.editor.syntax_pending {
+                        // Highlighting is spread over frames: continue with the next one.
+                        self.request_redraw();
+                    }
                 }
             }
             _ => {}

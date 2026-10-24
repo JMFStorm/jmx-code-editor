@@ -466,6 +466,9 @@ impl Editor {
 
     /// Load a workspace file and make it the current workspace.
     pub fn load_workspace(&mut self, file: &Path) -> Result<Vec<String>> {
+        // Absolute, so its folders are too (`jdc my.jdcws` from a shell gives a relative
+        // path; tools run in other folders would not find relative ones).
+        let file = &std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
         let wf = read_file(file)?;
         let base = base_of(file);
         let ws = Workspace {

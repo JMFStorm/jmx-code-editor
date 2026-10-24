@@ -13,6 +13,7 @@ mod keymap;
 mod lint;
 mod logging;
 mod paths;
+mod perf;
 mod process;
 mod render;
 mod session;
@@ -190,6 +191,9 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<i32> {
+    if args.headless {
+        headless::start_clock();
+    }
     let mut editor = editor::Editor::new(config::Config::default(), &args.paths);
     // Remember (and with no files given, reopen) the last workspace. Headless runs leave the
     // user's state alone unless a state file is given.

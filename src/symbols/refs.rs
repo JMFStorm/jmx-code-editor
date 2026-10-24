@@ -33,6 +33,10 @@ pub struct Reference {
 /// The uses of the query's name in one file; `aliases` are other local names for it in
 /// this file (`import { name as alias }`).
 pub fn find_in(path: &Path, text: &str, q: &RefQuery, aliases: &[String]) -> Vec<Reference> {
+    super::with_line_index(|| find_uses(path, text, q, aliases))
+}
+
+fn find_uses(path: &Path, text: &str, q: &RefQuery, aliases: &[String]) -> Vec<Reference> {
     let in_def_file = q.def_file.as_deref() == Some(path);
     let wanted = |w: &str| w == q.name || aliases.iter().any(|a| a == w);
     // (byte offset, preceded by `.`)

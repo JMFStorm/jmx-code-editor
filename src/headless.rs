@@ -18,7 +18,8 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Longest a `state`, `shot` or `wait` waits for background work.
 const JOB_TIMEOUT: Duration = Duration::from_secs(10);
@@ -57,8 +58,18 @@ pub enum ScriptCmd {
     /// Screenshot without waiting for background work (to see progress indicators).
     ShotNow(PathBuf),
     State,
-    /// Wait for background work (Find in Files) to finish.
-    Wait,
+    /// Wait for background work (Find in Files) to finish, up to N seconds (default 10).
+    Wait(Option<u64>),
+    /// Print timing (since the last `perf`), memory and work counters as JSON.
+    Perf(String),
+    /// Append a line to the first N source files under a folder (outside changes).
+    Touch(PathBuf, usize),
+    /// Build and render N frames; print the time per frame.
+    Frames(u32),
+    /// Type text with a frame after every character (what typing costs); print per-key times.
+    TypeFrames(String),
+    /// Press a key N times with a frame after each; print per-key times.
+    Keys(ModifiersState, Key, Option<String>, u32),
     Sleep(u64),
     Quit,
 }
@@ -188,6 +199,12 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
             if !session.draw(renderer, true) {
                 bail!("frame was not rendered");
             }
+            // Highlighting spread over frames: finish it, as the window would within frames.
+            let mut extra = 0;
+            while session.editor.syntax_pending && extra < 10_000 {
+                session.draw(renderer, true);
+                extra += 1;
+            }
             let (w, h, pixels) = renderer.gpu.capture()?;
             write_png(&path, w, h, &pixels)?;
             println!("shot {}", path.display());
@@ -196,7 +213,79 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
             session.editor.wait_jobs(JOB_TIMEOUT);
             println!("{}", state_json(session));
         }
-        ScriptCmd::Wait => session.editor.wait_jobs(JOB_TIMEOUT),
+        ScriptCmd::Wait(secs) => session
+            .editor
+            .wait_jobs(secs.map_or(JOB_TIMEOUT, Duration::from_secs)),
+        ScriptCmd::Perf(label) => {
+            let now = Instant::now();
+            let mut last = PERF_LAST.lock().unwrap_or_else(|e| e.into_inner());
+            let start = *PERF_START.get_or_init(|| now);
+            let since = now.duration_since(last.unwrap_or(start));
+            *last = Some(now);
+            let (rss, peak) = crate::perf::memory_kib().unwrap_or((0, 0));
+            println!(
+                "{{\"perf\":{},\"ms\":{:.1},\"total_ms\":{:.1},\"rss_kib\":{rss},\"peak_kib\":{peak},\"heap_kib\":{},{}}}",
+                json_str(&label),
+                since.as_secs_f64() * 1000.0,
+                now.duration_since(start).as_secs_f64() * 1000.0,
+                crate::perf::heap_in_use() / 1024,
+                crate::perf::counters_json()
+            );
+        }
+        ScriptCmd::Touch(dir, n) => {
+            let mut done = 0;
+            for e in crate::workspace::files::source_walker(&dir)
+                .build()
+                .flatten()
+            {
+                if done >= n {
+                    break;
+                }
+                let p = e.path();
+                if p.is_file() && p.extension().is_some_and(|x| x == "js" || x == "cs") {
+                    let mut f = fs::OpenOptions::new().append(true).open(p)?;
+                    writeln!(f, "// touched")?;
+                    done += 1;
+                }
+            }
+            println!("touched {done}");
+        }
+        ScriptCmd::Frames(n) => {
+            session.editor.poll_jobs();
+            let mut times = Vec::new();
+            for _ in 0..n {
+                let t = Instant::now();
+                session.draw(renderer, true);
+                times.push(t.elapsed());
+            }
+            println!("{}", timing_json("frames", &times));
+        }
+        ScriptCmd::TypeFrames(text) => {
+            let mut times = Vec::new();
+            for ch in text.chars() {
+                let t = Instant::now();
+                let s = ch.to_string();
+                let key = Key::Character(s.as_str().into());
+                session.key(&key, &key, Some(&s));
+                session.editor.poll_jobs();
+                session.draw(renderer, true);
+                times.push(t.elapsed());
+            }
+            println!("{}", timing_json("typef", &times));
+        }
+        ScriptCmd::Keys(mods, key, text, n) => {
+            let mut times = Vec::new();
+            for _ in 0..n {
+                let t = Instant::now();
+                session.modifiers = mods;
+                session.key(&key, &key, text.as_deref());
+                session.modifiers = ModifiersState::empty();
+                session.editor.poll_jobs();
+                session.draw(renderer, true);
+                times.push(t.elapsed());
+            }
+            println!("{}", timing_json("keys", &times));
+        }
         ScriptCmd::Sleep(ms) => {
             std::thread::sleep(Duration::from_millis(ms));
             session.editor.expire_message();
@@ -207,6 +296,30 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
     io::stdout().flush().ok();
     session.relayout(renderer);
     Ok(())
+}
+
+/// Start the `perf` clock (before the editor opens its files and workspace).
+pub fn start_clock() {
+    PERF_START.get_or_init(Instant::now);
+}
+
+/// When the first `perf` ran, and the last.
+static PERF_START: OnceLock<Instant> = OnceLock::new();
+static PERF_LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// `{"timing":"frames","n":60,"avg_ms":1.2,"p95_ms":2.0,"max_ms":3.1}`
+fn timing_json(what: &str, times: &[Duration]) -> String {
+    let mut ms: Vec<f64> = times.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
+    ms.sort_by(|a, b| a.total_cmp(b));
+    let n = ms.len().max(1);
+    let avg = ms.iter().sum::<f64>() / n as f64;
+    let p95 = ms.get((n * 95 / 100).min(n - 1)).copied().unwrap_or(0.0);
+    let max = ms.last().copied().unwrap_or(0.0);
+    format!(
+        "{{\"timing\":{},\"n\":{},\"avg_ms\":{avg:.2},\"p95_ms\":{p95:.2},\"max_ms\":{max:.2}}}",
+        json_str(what),
+        ms.len()
+    )
 }
 
 fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
@@ -302,7 +415,32 @@ pub fn parse_line(line: &str) -> Result<Option<ScriptCmd>> {
             ScriptCmd::ShotNow(PathBuf::from(arg))
         }
         "state" => ScriptCmd::State,
-        "wait" => ScriptCmd::Wait,
+        "perf" => ScriptCmd::Perf(arg.to_string()),
+        "touch" => {
+            need("a folder and a count")?;
+            let (dir, n) = arg
+                .rsplit_once(' ')
+                .ok_or_else(|| anyhow!("touch expects DIR COUNT"))?;
+            ScriptCmd::Touch(PathBuf::from(dir.trim()), n.trim().parse()?)
+        }
+        "frames" => {
+            need("a count")?;
+            ScriptCmd::Frames(arg.parse()?)
+        }
+        "typef" => ScriptCmd::TypeFrames(rest.to_string()),
+        "keys" => {
+            need("a key and a count")?;
+            let (spec, n) = arg
+                .rsplit_once(' ')
+                .ok_or_else(|| anyhow!("keys expects KEY COUNT"))?;
+            let (mods, key, text) = parse_key(spec)?;
+            ScriptCmd::Keys(mods, key, text, n.trim().parse()?)
+        }
+        "wait" => ScriptCmd::Wait(if arg.is_empty() {
+            None
+        } else {
+            Some(arg.parse()?)
+        }),
         "sleep" => {
             need("milliseconds")?;
             ScriptCmd::Sleep(arg.parse()?)

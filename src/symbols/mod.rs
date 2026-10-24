@@ -58,8 +58,35 @@ pub struct DocParam {
     pub text: String,
 }
 
+/// A declaration's docs. Most symbols have none, and the workspace index keeps none (they are
+/// read again from the file when shown), so an empty `Doc` is one pointer and no allocation;
+/// the fields are reached through `Deref`, and writing to them allocates the data.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Doc {
+pub struct Doc(Option<Box<DocData>>);
+
+static EMPTY_DOC: std::sync::LazyLock<DocData> = std::sync::LazyLock::new(DocData::default);
+
+impl std::ops::Deref for Doc {
+    type Target = DocData;
+    fn deref(&self) -> &DocData {
+        self.0.as_deref().unwrap_or(&EMPTY_DOC)
+    }
+}
+
+impl std::ops::DerefMut for Doc {
+    fn deref_mut(&mut self) -> &mut DocData {
+        self.0.get_or_insert_with(Default::default)
+    }
+}
+
+impl From<DocData> for Doc {
+    fn from(d: DocData) -> Self {
+        Doc(Some(Box::new(d)))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DocData {
     pub summary: String,
     pub params: Vec<DocParam>,
     /// Type (JSDoc only) and text.
@@ -78,7 +105,7 @@ pub struct Doc {
     pub typeparams: Vec<String>,
 }
 
-impl Doc {
+impl DocData {
     pub fn is_empty(&self) -> bool {
         self.summary.is_empty()
             && self.params.is_empty()
@@ -164,6 +191,11 @@ pub fn family(path: &Path) -> Option<Family> {
 
 /// Scan a file's text (`path` decides the language and resolves imports).
 pub fn scan(path: &Path, text: &str) -> Option<FileSymbols> {
+    with_line_index(|| scan_file(path, text))
+}
+
+fn scan_file(path: &Path, text: &str) -> Option<FileSymbols> {
+    crate::perf::bump(&crate::perf::SYMBOL_SCANS);
     match family(path)? {
         Family::Js => {
             let mut f = js::scan(path, text);
@@ -199,11 +231,15 @@ pub fn scan(path: &Path, text: &str) -> Option<FileSymbols> {
     }
 }
 
-/// Every scanned file, with a by-name lookup.
+/// Every scanned file, with a by-name lookup. Names map to small file ids (not a copy of
+/// the path per name), and each file is listed once per name.
 #[derive(Debug, Default)]
 pub struct SymbolIndex {
     files: HashMap<PathBuf, FileSymbols>,
-    by_name: HashMap<String, Vec<PathBuf>>,
+    /// File ids, never reused (an id of a removed file is just not in `files` any more).
+    ids: HashMap<PathBuf, u32>,
+    paths: Vec<PathBuf>,
+    by_name: HashMap<Box<str>, Vec<u32>>,
 }
 
 impl SymbolIndex {
@@ -221,33 +257,62 @@ impl SymbolIndex {
         self.files.len()
     }
 
-    pub fn set_file(&mut self, path: PathBuf, syms: FileSymbols) {
+    fn id_of(&mut self, path: &Path) -> u32 {
+        if let Some(id) = self.ids.get(path) {
+            return *id;
+        }
+        let id = self.paths.len() as u32;
+        self.paths.push(path.to_path_buf());
+        self.ids.insert(path.to_path_buf(), id);
+        id
+    }
+
+    pub fn set_file(&mut self, path: PathBuf, mut syms: FileSymbols) {
+        // Docs are read again from the file when shown: most are never looked at, and they
+        // are most of a symbol's size.
+        for s in &mut syms.symbols {
+            s.doc = Doc::default();
+            s.params.shrink_to_fit();
+            s.signature.shrink_to_fit();
+        }
+        syms.symbols.shrink_to_fit();
+        syms.imports.shrink_to_fit();
         self.remove_file(&path);
-        for s in &syms.symbols {
-            let list = self.by_name.entry(s.name.clone()).or_default();
-            if !list.contains(&path) {
-                list.push(path.clone());
+        let id = self.id_of(&path);
+        let names: std::collections::HashSet<&str> =
+            syms.symbols.iter().map(|s| s.name.as_str()).collect();
+        for name in names {
+            match self.by_name.get_mut(name) {
+                Some(list) => list.push(id),
+                None => {
+                    self.by_name.insert(name.into(), vec![id]);
+                }
             }
         }
         self.files.insert(path, syms);
     }
 
     pub fn remove_file(&mut self, path: &Path) {
-        if let Some(old) = self.files.remove(path) {
-            for s in &old.symbols {
-                if let Some(list) = self.by_name.get_mut(&s.name) {
-                    list.retain(|p| p != path);
-                    if list.is_empty() {
-                        self.by_name.remove(&s.name);
-                    }
+        let Some(old) = self.files.remove(path) else {
+            return;
+        };
+        let Some(&id) = self.ids.get(path) else {
+            return;
+        };
+        let names: std::collections::HashSet<&str> =
+            old.symbols.iter().map(|s| s.name.as_str()).collect();
+        for name in names {
+            if let Some(list) = self.by_name.get_mut(name) {
+                list.retain(|i| *i != id);
+                if list.is_empty() {
+                    self.by_name.remove(name);
                 }
             }
         }
     }
 
     pub fn clear(&mut self) {
-        self.files.clear();
-        self.by_name.clear();
+        *self = Self::default();
     }
 
     /// Every symbol called `name`, with its file.
@@ -256,7 +321,10 @@ impl SymbolIndex {
             .get(name)
             .into_iter()
             .flatten()
-            .filter_map(move |p| Some((p.as_path(), self.files.get(p)?)))
+            .filter_map(move |id| {
+                let p = self.paths.get(*id as usize)?;
+                Some((p.as_path(), self.files.get(p)?))
+            })
             .flat_map(move |(p, f)| {
                 f.symbols
                     .iter()
@@ -304,12 +372,88 @@ pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The line starts of a text, keyed by its address and length.
+type LineTable = (usize, usize, Vec<usize>);
+
+thread_local! {
+    /// Within `with_line_index`: how deep the scopes are nested, and the line table of the
+    /// text being scanned.
+    static LINES: std::cell::RefCell<(usize, Option<LineTable>)> =
+        const { std::cell::RefCell::new((0, None)) };
+}
+
+thread_local! {
+    /// Within `scan_for_index`: doc comments are noticed but not parsed.
+    static SKIP_DOCS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Scan for the workspace index, which keeps no docs (they are read again from the file when
+/// a popup shows them): doc comments aren't parsed, saving time and memory.
+pub fn scan_for_index(path: &Path, text: &str) -> Option<FileSymbols> {
+    let was = SKIP_DOCS.with(|s| s.replace(true));
+    let r = scan(path, text);
+    SKIP_DOCS.with(|s| s.set(was));
+    r
+}
+
+pub(crate) fn skipping_docs() -> bool {
+    SKIP_DOCS.with(|s| s.get())
+}
+
+/// "Has a doc comment" without its content (some declarations are only indexed when
+/// documented).
+pub(crate) fn doc_marker() -> Doc {
+    let mut d = Doc::default();
+    d.summary.push('…');
+    d
+}
+
+/// Run a scan with fast `line_col`: the text's line starts are found once and looked up by
+/// binary search (a scan asks for the position of every symbol; counting newlines from the
+/// start each time is quadratic in big files). The table is dropped when the scope ends.
+pub fn with_line_index<R>(f: impl FnOnce() -> R) -> R {
+    LINES.with(|l| l.borrow_mut().0 += 1);
+    let r = f();
+    LINES.with(|l| {
+        let mut l = l.borrow_mut();
+        l.0 -= 1;
+        if l.0 == 0 {
+            l.1 = None;
+        }
+    });
+    r
+}
+
 /// 0-based line and char column of a byte offset.
 pub fn line_col(src: &str, byte: usize) -> (usize, usize) {
-    let before = &src[..byte.min(src.len())];
-    let line = before.bytes().filter(|&b| b == b'\n').count();
-    let col = before.rsplit('\n').next().unwrap_or("").chars().count();
-    (line, col)
+    let byte = byte.min(src.len());
+    let fast = LINES.with(|l| {
+        let mut l = l.borrow_mut();
+        if l.0 == 0 {
+            return None;
+        }
+        let key = (src.as_ptr() as usize, src.len());
+        if !l.1.as_ref().is_some_and(|(p, n, _)| (*p, *n) == key) {
+            let starts = std::iter::once(0)
+                .chain(
+                    src.bytes()
+                        .enumerate()
+                        .filter(|(_, b)| *b == b'\n')
+                        .map(|(i, _)| i + 1),
+                )
+                .collect();
+            l.1 = Some((key.0, key.1, starts));
+        }
+        let starts = &l.1.as_ref()?.2;
+        let line = starts.partition_point(|&s| s <= byte) - 1;
+        Some((line, src[starts[line]..byte].chars().count()))
+    });
+    fast.unwrap_or_else(|| {
+        let before = &src[..byte];
+        let line = before.bytes().filter(|&b| b == b'\n').count();
+        let col = before.rsplit('\n').next().unwrap_or("").chars().count();
+        (line, col)
+    })
 }
 
 #[cfg(test)]

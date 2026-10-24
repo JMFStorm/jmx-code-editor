@@ -1,0 +1,7 @@
+wait 300
+perf ready
+touch sandbox/stress/web/packages 2000
+sleep 1500
+wait 120
+perf settled
+frames 10

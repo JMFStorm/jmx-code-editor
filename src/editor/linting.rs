@@ -256,6 +256,7 @@ impl Editor {
         let doc = &mut self.panes[p].docs[i];
         if changed {
             doc.rope = Rope::from_str(&page.text);
+            crate::perf::bump(&crate::perf::PAGE_REBUILDS);
             doc.syntax.set_lang(Lang::Problems);
         }
         let line = new_line.min(doc.rope.len_lines().saturating_sub(1));

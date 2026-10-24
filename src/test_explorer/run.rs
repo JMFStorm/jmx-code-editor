@@ -2,6 +2,7 @@
 //! and mapping their results back to the discovered tests.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -568,25 +569,69 @@ fn parse_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs_f64(h * 3600.0 + m * 60.0 + sec))
 }
 
-/// The results that belong to `test`, combined (data rows: failed if any row failed).
+/// Every outcome that belongs to `test` (tests check `OutcomeIndex` gives the same).
+#[cfg(test)]
 pub fn match_outcome<'a>(test: &TestCase, outcomes: &'a [Outcome]) -> Vec<&'a Outcome> {
-    outcomes
+    let all: Vec<&Outcome> = outcomes
         .iter()
-        .filter(|o| match &o.key {
-            Key::Dotnet(name) => test.found.full_name.as_deref() == Some(name.as_str()),
-            Key::Js { file, path } => {
-                if *file != test.file {
-                    return false;
-                }
-                // A file-level failure (the file did not load) applies to all its tests.
-                if path.is_empty() {
-                    return true;
-                }
-                let (title, suite) = path.split_last().expect("non-empty");
-                suite == test.found.suite.as_slice() && title_matches(&test.found.name, title)
+        .filter(|o| outcome_matches(test, o))
+        .collect();
+    assert_eq!(OutcomeIndex::new(outcomes).matching(test), all);
+    all
+}
+
+fn outcome_matches(test: &TestCase, o: &Outcome) -> bool {
+    match &o.key {
+        Key::Dotnet(name) => test.found.full_name.as_deref() == Some(name.as_str()),
+        Key::Js { file, path } => {
+            if *file != test.file {
+                return false;
             }
-        })
-        .collect()
+            // A file-level failure (the file did not load) applies to all its tests.
+            if path.is_empty() {
+                return true;
+            }
+            let (title, suite) = path.split_last().expect("non-empty");
+            suite == test.found.suite.as_slice() && title_matches(&test.found.name, title)
+        }
+    }
+}
+
+/// A report's outcomes by .NET name and by JS file, so matching every test of a big run
+/// looks at its own few outcomes instead of all of them.
+pub struct OutcomeIndex<'a> {
+    dotnet: HashMap<&'a str, Vec<&'a Outcome>>,
+    js: HashMap<&'a Path, Vec<&'a Outcome>>,
+}
+
+impl<'a> OutcomeIndex<'a> {
+    pub fn new(outcomes: &'a [Outcome]) -> Self {
+        let mut ix = OutcomeIndex {
+            dotnet: HashMap::new(),
+            js: HashMap::new(),
+        };
+        for o in outcomes {
+            match &o.key {
+                Key::Dotnet(name) => ix.dotnet.entry(name.as_str()).or_default().push(o),
+                Key::Js { file, .. } => ix.js.entry(file.as_path()).or_default().push(o),
+            }
+        }
+        ix
+    }
+
+    /// Same as `match_outcome` over all the outcomes.
+    pub fn matching(&self, test: &TestCase) -> Vec<&'a Outcome> {
+        let mut out: Vec<&'a Outcome> = Vec::new();
+        if let Some(name) = test.found.full_name.as_deref()
+            && let Some(list) = self.dotnet.get(name)
+        {
+            out.extend(list.iter().copied());
+        }
+        if let Some(list) = self.js.get(test.file.as_path()) {
+            out.extend(list.iter().copied().filter(|o| outcome_matches(test, o)));
+        }
+        out
+    }
 }
 
 /// `it.each` titles: `accepts %s` matches `accepts a@b.fi`; `${…}` matches anything.

@@ -32,5 +32,9 @@ strip = true
 [profile.dev.package."*"]
 opt-level = 2
 
+# glibc's malloc_trim: give memory freed after big background scans back to the system.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 embed-resource = "3.0.12"

@@ -237,9 +237,16 @@ fn file_text(path: &Path, unsaved: &HashMap<PathBuf, String>) -> Option<String> 
 }
 
 /// Every line of `text` with a match.
+/// Hits kept from one file (a log where every line matches would otherwise flood the list
+/// and memory before the global cap is checked).
+pub const MAX_HITS_PER_FILE: usize = 1000;
+
 pub fn search_text(query: &Query, text: &str) -> Vec<Hit> {
     let mut hits = Vec::new();
     for (i, line) in text.split('\n').enumerate() {
+        if hits.len() >= MAX_HITS_PER_FILE {
+            break;
+        }
         let line = line.strip_suffix('\r').unwrap_or(line);
         let ranges = query.matches_in(line);
         if let Some(&(start, end)) = ranges.first() {

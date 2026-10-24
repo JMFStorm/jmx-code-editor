@@ -93,6 +93,7 @@ pub fn run_cancellable(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    crate::perf::bump(&crate::perf::PROCESSES);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot run {}: {e}", program.display()))?;

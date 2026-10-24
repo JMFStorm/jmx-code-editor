@@ -123,9 +123,11 @@ fn display_spans(
     }
     let mut out = String::new();
     let mut ranges: Vec<(std::ops::Range<usize>, Rgba)> = Vec::new();
-    let mut col = 0;
     let right = left + cols;
-    for (i, c) in line.chars().enumerate() {
+    // Straight to the first visible column (long lines scrolled far right).
+    let (first, mut col) = mv::skip_to_col(line, left, tab);
+    for (i, c) in line.slice(first..).chars().enumerate() {
+        let i = first + i;
         if c == '\n' {
             break;
         }
@@ -927,12 +929,31 @@ fn draw_text_area(
     let (top, left) = (doc.view.top_line, doc.view.left_col);
     let cursor_line = rope.char_to_line(doc.selection.head);
     let (sel_s, sel_e) = doc.selection.range();
-    // All selections in multi-cursor mode (just the primary one otherwise).
-    let sels = doc.all_selections();
-    let diags = doc
+    // The visible text: per-line work only looks at what overlaps it.
+    let last_line = (top + pl.rows + 1).min(rope.len_lines().saturating_sub(1));
+    let vis_start = rope.line_to_char(top.min(rope.len_lines().saturating_sub(1)));
+    let vis_end = rope.line_to_char(last_line) + rope.line(last_line).len_chars();
+    // Selections on screen (multi-cursor: just those), with their cursor lines.
+    let sels: Vec<_> = doc
+        .all_selections()
+        .into_iter()
+        .filter(|s| {
+            let (a, b) = s.range();
+            b >= vis_start && a <= vis_end
+        })
+        .collect();
+    let cursor_lines: Vec<(usize, usize)> = sels
+        .iter()
+        .map(|s| (rope.char_to_line(s.head), s.head))
+        .collect();
+    // Problems on screen.
+    let diags: Vec<&crate::lint::Diagnostic> = doc
         .canonical
         .as_ref()
-        .map_or(&[][..], |p| ed.problems.for_file(p));
+        .map_or(&[][..], |p| ed.problems.for_file(p))
+        .iter()
+        .filter(|d| d.end_line >= top && d.line <= last_line)
+        .collect();
     let test_marks = doc
         .canonical
         .as_ref()
@@ -998,9 +1019,17 @@ fn draw_text_area(
         let y = pl.text.y + row as f32 * l.line_h;
         let ls = rope.line_to_char(line);
         let le = mv::line_content_end(rope, line);
+        // Columns are measured from the line start; consecutive calls continue from the last
+        // position, so long lines aren't walked again for every match or selection edge.
+        let walked = std::cell::Cell::new((ls, 0usize));
         let col_x = |p: usize| -> f32 {
-            let c = mv::width_of(rope.slice(ls..p), 0, tab) as f32 - left as f32;
-            pl.text.x + c * l.cell_w
+            let (mut at, mut col) = walked.get();
+            if p < at {
+                (at, col) = (ls, 0);
+            }
+            col += mv::width_of(rope.slice(at..p), col, tab);
+            walked.set((p, col));
+            pl.text.x + (col as f32 - left as f32) * l.cell_w
         };
 
         if line == cursor_line && focused {
@@ -1045,9 +1074,17 @@ fn draw_text_area(
         }
 
         if let Some(q) = &query {
-            let text: std::borrow::Cow<str> = rope.slice(ls..le).into();
+            // Long lines: only the part around the visible columns (matches near the edge of
+            // the window may be cut; they are off screen anyway).
+            let (ws, we) = if le - ls > 2000 {
+                let from = (ls + left).saturating_sub(256).max(ls).min(le);
+                (from, (from + pl.cols + 512).min(le))
+            } else {
+                (ls, le)
+            };
+            let text: std::borrow::Cow<str> = rope.slice(ws..we).into();
             for (ms, me) in q.matches_in(&text) {
-                let (s, e) = (ls + ms, ls + me);
+                let (s, e) = (ws + ms, ws + me);
                 let x0 = col_x(s).max(pl.text.x);
                 let x1 = col_x(e).min(pl.text.right());
                 let color = if (s, e) == (sel_s, sel_e) {
@@ -1157,11 +1194,8 @@ fn draw_text_area(
         }
 
         if focused && cursor_on && ed.minibuffer.is_none() {
-            for s in &sels {
-                if rope.char_to_line(s.head) != line {
-                    continue;
-                }
-                let x = col_x(s.head);
+            for &(_, head) in cursor_lines.iter().filter(|(l, _)| *l == line) {
+                let x = col_x(head);
                 if x >= pl.text.x - 1.0 && x <= pl.text.right() {
                     let w = (2.0 * l.scale).round().max(2.0);
                     b.rect(Rect::new(x, y, w, l.line_h), theme.cursor);

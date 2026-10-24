@@ -236,6 +236,7 @@ impl Editor {
         let doc = &mut self.panes[p].docs[i];
         if doc.rope != text.as_str() {
             doc.rope = Rope::from_str(&text);
+            crate::perf::bump(&crate::perf::PAGE_REBUILDS);
         }
         doc.syntax.set_lang(Lang::References);
         doc.boxes = page.boxes;

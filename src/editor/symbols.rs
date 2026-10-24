@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ropey::Rope;
 
@@ -19,6 +19,14 @@ use crate::symbols::dotnet_docs::{self, DotnetDocs, Receiver as Recv, Scope};
 use crate::symbols::mdn::{self, WebDoc};
 use crate::symbols::{self, Doc, Family, FileSymbols, Kind, Symbol, SymbolIndex};
 use crate::ui::picker::FilePicker;
+
+/// Open documents up to this size are rescanned right away when looked up; bigger ones in
+/// the background after typing pauses.
+const LIVE_SYNC_CHARS: usize = 256 * 1024;
+/// Files whose docs are kept after being read for a popup.
+const DOC_CACHE_FILES: usize = 16;
+/// The pause before a big document is rescanned.
+const LIVE_DELAY: Duration = Duration::from_millis(300);
 
 /// Files bigger than this are not scanned (bundles, generated code).
 const MAX_FILE: u64 = 1 << 20;
@@ -40,6 +48,13 @@ pub struct SymbolState {
     /// The .NET API docs of the workspace's C# projects (loaded in the background).
     pub dotnet: Option<Arc<DotnetDocs>>,
     dotnet_job: Option<Receiver<DotnetDocs>>,
+    /// Background rescans of big open documents.
+    live_jobs: Vec<Receiver<(PathBuf, u64, Option<FileSymbols>)>>,
+    live_busy: std::collections::HashSet<PathBuf>,
+    /// The revision of a big document's last edit and when it was first seen.
+    live_edit: HashMap<PathBuf, (u64, Instant)>,
+    /// Recently scanned files, for their docs: (path, text version, symbols).
+    doc_cache: RefCell<Vec<(PathBuf, u64, Arc<FileSymbols>)>>,
     /// npm packages' parsed declaration files.
     pub dts: RefCell<crate::symbols::npm::DtsCache>,
     /// A C# project's implicit global usings.
@@ -271,28 +286,45 @@ impl Editor {
             .name("jdc-symbols".into())
             .spawn(move || {
                 let started = Instant::now();
-                let mut out = Vec::new();
+                // Every core: files are read and scanned in parallel.
+                let out = std::sync::Mutex::new(Vec::new());
                 for folder in &folders {
-                    for entry in crate::workspace::files::source_walker(folder)
-                        .build()
-                        .flatten()
-                    {
-                        let path = entry.into_path();
-                        if symbols::family(&path).is_none()
-                            || entry_too_big(&path)
-                            || path.components().any(|c| c.as_os_str() == "node_modules")
-                        {
-                            continue;
-                        }
-                        let Ok(text) = std::fs::read_to_string(&path) else {
-                            continue;
-                        };
-                        let path = std::fs::canonicalize(&path).unwrap_or(path);
-                        if let Some(found) = symbols::scan(&path, &text) {
-                            out.push((path, found));
-                        }
-                    }
+                    crate::workspace::files::source_walker(folder)
+                        .build_parallel()
+                        .run(|| {
+                            let out = &out;
+                            Box::new(move |entry| {
+                                let Ok(entry) = entry else {
+                                    return ignore::WalkState::Continue;
+                                };
+                                let path = entry.path();
+                                if !entry.file_type().is_some_and(|t| t.is_file())
+                                    || symbols::family(path).is_none()
+                                    || entry_too_big(path)
+                                    || path.components().any(|c| c.as_os_str() == "node_modules")
+                                {
+                                    return ignore::WalkState::Continue;
+                                }
+                                if let Ok(text) = std::fs::read_to_string(path) {
+                                    let path =
+                                        std::fs::canonicalize(path).unwrap_or(path.to_path_buf());
+                                    if let Some(mut found) = symbols::scan_for_index(&path, &text) {
+                                        // The index keeps no docs (see `doc_of`).
+                                        for s in &mut found.symbols {
+                                            s.doc = Doc::default();
+                                        }
+                                        out.lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .push((path, found));
+                                    }
+                                }
+                                ignore::WalkState::Continue
+                            })
+                        });
                 }
+                let mut out = out.into_inner().unwrap_or_else(|e| e.into_inner());
+                // Same order every time (the walk's order varies between threads).
+                out.sort_by(|a, b| a.0.cmp(&b.0));
                 log::info!(
                     "symbol scan: {} files in {:?}",
                     out.len(),
@@ -369,12 +401,16 @@ impl Editor {
             Err(mpsc::TryRecvError::Empty) => true,
             Err(mpsc::TryRecvError::Disconnected) => false,
         });
+        if done {
+            crate::perf::trim_memory();
+        }
         if let Some(rx) = &self.symbols.dotnet_job {
             match rx.try_recv() {
                 Ok(docs) => {
                     self.symbols.dotnet = Some(Arc::new(docs));
                     self.symbols.dotnet_job = None;
                     done = true;
+                    crate::perf::trim_memory();
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => self.symbols.dotnet_job = None,
@@ -407,7 +443,7 @@ impl Editor {
             return;
         }
         if let Ok(text) = std::fs::read_to_string(path)
-            && let Some(found) = symbols::scan(path, &text)
+            && let Some(found) = symbols::scan_for_index(path, &text)
         {
             self.symbols
                 .index
@@ -417,6 +453,8 @@ impl Editor {
     }
 
     /// Scan open documents whose text changed since their last scan.
+    /// Small documents are scanned right away (exact results while typing); big ones are
+    /// left to `poll_live_symbols`, which scans them in the background after a pause.
     fn sync_live_symbols(&self) {
         let mut ix = self.symbols.index.borrow_mut();
         let mut live = self.symbols.live.borrow_mut();
@@ -424,14 +462,108 @@ impl Editor {
             let Some(path) = &doc.canonical else {
                 continue;
             };
-            if symbols::family(path).is_none() || live.get(path) == Some(&doc.revision) {
+            if symbols::family(path).is_none()
+                || live.get(path) == Some(&doc.revision)
+                || doc.rope.len_chars() > LIVE_SYNC_CHARS
+            {
                 continue;
             }
-            if let Some(found) = symbols::scan(path, &doc.rope.to_string()) {
+            if let Some(found) = symbols::scan_for_index(path, &doc.rope.to_string()) {
                 ix.set_file(path.clone(), found);
             }
             live.insert(path.clone(), doc.revision);
         }
+    }
+
+    /// Big open documents edited since their last scan: scan them on a worker thread once
+    /// typing has paused (`LIVE_DELAY`); collect finished scans. Returns true when the index
+    /// changed.
+    pub(super) fn poll_live_symbols(&mut self) -> bool {
+        let now = Instant::now();
+        let mut changed = false;
+        // Finished background scans (dropped if the text moved on meanwhile).
+        let mut done = Vec::new();
+        self.symbols.live_jobs.retain(|rx| match rx.try_recv() {
+            Ok(r) => {
+                done.push(r);
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => false,
+        });
+        for (path, rev, found) in done {
+            if let Some(found) = found {
+                self.symbols
+                    .index
+                    .borrow_mut()
+                    .set_file(path.clone(), found);
+                changed = true;
+            }
+            self.symbols.live.borrow_mut().insert(path.clone(), rev);
+            self.symbols.live_busy.remove(&path);
+        }
+        for doc in self.panes.iter().flat_map(|p| p.docs.iter()) {
+            let Some(path) = &doc.canonical else {
+                continue;
+            };
+            if doc.rope.len_chars() <= LIVE_SYNC_CHARS
+                || symbols::family(path).is_none()
+                || self.symbols.live.borrow().get(path) == Some(&doc.revision)
+                || self.symbols.live_busy.contains(path)
+            {
+                continue;
+            }
+            let since = self
+                .symbols
+                .live_edit
+                .get(path)
+                .filter(|(r, _)| *r == doc.revision);
+            match since {
+                None => {
+                    self.symbols
+                        .live_edit
+                        .insert(path.clone(), (doc.revision, now));
+                }
+                Some((_, at)) if now.duration_since(*at) >= LIVE_DELAY => {
+                    let (tx, rx) = mpsc::channel();
+                    let (rope, p, rev) = (doc.rope.clone(), path.clone(), doc.revision);
+                    std::thread::Builder::new()
+                        .name("jdc-live-scan".into())
+                        .spawn(move || {
+                            let found = symbols::scan_for_index(&p, &rope.to_string());
+                            let _ = tx.send((p, rev, found));
+                        })
+                        .expect("cannot start live scan");
+                    self.symbols.live_jobs.push(rx);
+                    self.symbols.live_busy.insert(path.clone());
+                }
+                Some(_) => {}
+            }
+        }
+        changed
+    }
+
+    /// When `poll_live_symbols` has something to do next.
+    pub(super) fn live_symbols_deadline(&self) -> Option<Instant> {
+        if !self.symbols.live_jobs.is_empty() {
+            return Some(Instant::now() + Duration::from_millis(50));
+        }
+        self.symbols
+            .live_edit
+            .values()
+            .map(|(_, at)| *at + LIVE_DELAY)
+            .min()
+            .filter(|_| self.has_stale_big_doc())
+    }
+
+    fn has_stale_big_doc(&self) -> bool {
+        self.panes.iter().flat_map(|p| p.docs.iter()).any(|d| {
+            d.rope.len_chars() > LIVE_SYNC_CHARS
+                && d.canonical.as_ref().is_some_and(|p| {
+                    symbols::family(p).is_some()
+                        && self.symbols.live.borrow().get(p) != Some(&d.revision)
+                })
+        })
     }
 
     // ------------------------------------------------------------ resolving names
@@ -476,8 +608,13 @@ impl Editor {
                 let Some(d) = &self.symbols.dotnet else {
                     return Vec::new();
                 };
+                // `using`s and the namespace sit at the top: the head of the file is enough
+                // (no copy of a big file per lookup).
+                let head = text.slice(..text.len_chars().min(64 * 1024)).to_string();
+                let mut own = Scope::default();
+                own.add_source(&head);
                 let mut scope = self.cs_scope(path);
-                scope.add_source(&text.to_string());
+                scope.add_source(&head);
                 // `string`, `int`, …: their framework types.
                 let name = match dotnet_docs::keyword_type(name) {
                     Some(full) => {
@@ -496,10 +633,8 @@ impl Editor {
                 // Best first: members of the enclosing class's base types (a controller's
                 // `Ok()`), then of namespaces this file imports itself.
                 let bases = self.enclosing_bases(path, line);
-                let mut own = Scope::default();
-                own.add_source(&text.to_string());
                 let mut ids = d.resolve(&scope, name, recv);
-                ids.sort_by_key(|i| {
+                ids.sort_by_cached_key(|i| {
                     let (_, _, ty) = d.describe(*i);
                     let ns = d.namespace_of_entry(*i);
                     (!bases.contains(&ty), !own.namespaces.contains(&ns))
@@ -773,8 +908,9 @@ impl Editor {
     /// A symbol's doc, or the doc of the member it implements (an interface or base type
     /// listed by its class) when it has none.
     fn effective_doc(&self, f: &Found) -> Doc {
-        if !f.sym.doc.is_empty() {
-            return f.sym.doc.clone();
+        let own = self.doc_of(&f.path, &f.sym);
+        if !own.is_empty() {
+            return own;
         }
         let Some(container) = &f.sym.container else {
             return Doc::default();
@@ -791,13 +927,62 @@ impl Editor {
         let bases = base_names(&class.signature);
         let family = symbols::family(&f.path);
         ix.named(&f.sym.name)
-            .find(|(p, s)| {
+            .filter(|(p, s)| {
                 symbols::family(p) == family
                     && s.container.as_ref().is_some_and(|c| bases.contains(c))
                     && s.params.len() == f.sym.params.len()
-                    && !s.doc.is_empty()
             })
-            .map(|(_, s)| s.doc.clone())
+            .map(|(p, s)| self.doc_of(p, s))
+            .find(|d| !d.is_empty())
+            .unwrap_or_default()
+    }
+
+    /// A symbol's docs. The index keeps none: they are read again from its file (the open
+    /// buffer, if any) when shown, with the last few files' scans kept.
+    pub(super) fn doc_of(&self, path: &Path, sym: &Symbol) -> Doc {
+        if !sym.doc.is_empty() || path.as_os_str().is_empty() {
+            return sym.doc.clone();
+        }
+        let open = self.find_doc(|d| d.canonical.as_deref() == Some(path));
+        // Which text: the open buffer's revision, or the file's modification time.
+        let key = match open {
+            Some((p, i)) => self.panes[p].docs[i].revision | 1 << 63,
+            None => std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos() as u64 & !(1 << 63)),
+        };
+        let mut cache = self.symbols.doc_cache.borrow_mut();
+        let pos = cache.iter().position(|(p, k, _)| p == path && *k == key);
+        let file = match pos {
+            Some(i) => {
+                let hit = cache.remove(i);
+                let file = hit.2.clone();
+                cache.push(hit);
+                file
+            }
+            None => {
+                let text = match open {
+                    Some((p, i)) => self.panes[p].docs[i].rope.to_string(),
+                    None => std::fs::read_to_string(path).unwrap_or_default(),
+                };
+                let Some(found) = symbols::scan(path, &text) else {
+                    return Doc::default();
+                };
+                let file = Arc::new(found);
+                cache.retain(|(p, _, _)| p != path);
+                if cache.len() >= DOC_CACHE_FILES {
+                    cache.remove(0);
+                }
+                cache.push((path.to_path_buf(), key, file.clone()));
+                file
+            }
+        };
+        file.symbols
+            .iter()
+            .find(|s| s.name == sym.name && s.line == sym.line && s.col == sym.col)
+            .map(|s| s.doc.clone())
             .unwrap_or_default()
     }
 

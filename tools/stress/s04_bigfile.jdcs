@@ -1,0 +1,26 @@
+wait 300
+perf ready
+key ctrl+p
+type bigbigjs
+key enter
+perf opened
+frames 30
+key ctrl+end
+perf ctrl-end
+frames 30
+key ctrl+home
+typef // an edit at the very top of a huge file
+key ctrl+end
+perf typed-top-then-end
+frames 30
+keys pageup 50
+keys down 200
+perf scrolled
+key ctrl+p
+type bigbigjs:2:1
+key enter
+key ctrl+shift+l
+perf select-all-occurrences
+frames 10
+typef X
+perf typed-at-all-cursors

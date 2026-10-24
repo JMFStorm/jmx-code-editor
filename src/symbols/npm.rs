@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::Symbol;
 use super::dts::{self, DtsFile};
@@ -120,15 +121,15 @@ fn resolve(from: &Path, spec: &str) -> Option<PathBuf> {
     Some(std::fs::canonicalize(&found).unwrap_or(found))
 }
 
-/// Parsed declaration files, by path.
-pub type DtsCache = HashMap<PathBuf, DtsFile>;
+/// Parsed declaration files, by path (shared: lookups walk several of them).
+pub type DtsCache = HashMap<PathBuf, Arc<DtsFile>>;
 
-fn load<'a>(cache: &'a mut DtsCache, path: &Path) -> Option<&'a DtsFile> {
+fn load(cache: &mut DtsCache, path: &Path) -> Option<Arc<DtsFile>> {
     if !cache.contains_key(path) {
         let text = std::fs::read_to_string(path).ok()?;
-        cache.insert(path.to_path_buf(), dts::scan(&text));
+        cache.insert(path.to_path_buf(), Arc::new(dts::scan(&text)));
     }
-    cache.get(path)
+    cache.get(path).cloned()
 }
 
 /// Where `name`, exported by the declaration file `entry`, is declared: every declaration of
@@ -150,7 +151,7 @@ fn find(
     if depth > MAX_DEPTH || !seen.insert((file.to_path_buf(), name.to_string())) {
         return Vec::new();
     }
-    let Some(f) = load(cache, file).cloned() else {
+    let Some(f) = load(cache, file) else {
         return Vec::new();
     };
     // `declare const computed: typeof computed$1` with `import { computed as computed$1 }`.

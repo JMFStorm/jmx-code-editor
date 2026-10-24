@@ -183,7 +183,7 @@ fn docs_text(d: &DotnetDocs, idx: u32, matches: &[u32], width: usize) -> PageTex
                 if !seen.insert(key) {
                     continue; // overloads: once
                 }
-                let summary = d.doc(m).summary;
+                let summary = d.doc(m).summary.clone();
                 let first = summary
                     .split(". ")
                     .next()

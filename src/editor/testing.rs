@@ -22,6 +22,11 @@ use crate::test_explorer::run::{self, Request, TestJob};
 use crate::test_explorer::watch::FsWatcher;
 use crate::test_explorer::{self as tx, FileTests, Framework, Project, RunResult, Status};
 
+/// More files changed outside at once than this: lint the workspace once, not file by file.
+const BULK_CHANGES: usize = 20;
+/// Pages longer than this rebuild for their spinners only every `BIG_PAGE_SPIN`.
+const BIG_PAGE_LINES: usize = 3000;
+const BIG_PAGE_SPIN: Duration = Duration::from_secs(1);
 pub const TESTS_TITLE: &str = "Tests";
 
 /// Quiet time after an edit before a test file is re-parsed.
@@ -121,6 +126,8 @@ pub struct TestState {
     batch_started: Option<Instant>,
     /// Last spinner frame drawn while something runs.
     last_spin: Option<Instant>,
+    /// Last time big pages were rebuilt for their spinner glyphs.
+    last_page_spin: Option<Instant>,
     /// Test project roots to re-scan, when (runner or framework config changed).
     rescan_wanted: HashMap<PathBuf, Instant>,
 }
@@ -262,7 +269,15 @@ impl Editor {
                 continue;
             }
             if self.tests.seen.get(path) != Some(&doc.revision) {
-                changed.push(path.clone());
+                // Just opened, unedited, after the workspace scan: the scan already parsed
+                // this very text (re-parsing would re-sort every test and rebuild the page).
+                let fresh = !self.tests.seen.contains_key(path)
+                    && !doc.is_dirty()
+                    && self.tests.scans.is_empty()
+                    && self.workspace.is_some();
+                if !fresh {
+                    changed.push(path.clone());
+                }
                 self.tests.seen.insert(path.clone(), doc.revision);
             }
         }
@@ -308,6 +323,7 @@ impl Editor {
                     self.tests.tree.remove_file(&f);
                 }
             }
+            let mut merged = Vec::new();
             for (path, project, ft) in found {
                 if !self
                     .tests
@@ -325,9 +341,11 @@ impl Editor {
                 {
                     self.tests.reparse.insert(path, now);
                 } else {
-                    self.tests.tree.replace_file(&path, ft);
+                    merged.push((path, ft));
                 }
             }
+            self.tests.tree.replace_files(merged);
+            crate::perf::trim_memory();
             self.tests
                 .tree
                 .projects
@@ -343,8 +361,18 @@ impl Editor {
                 .as_ref()
                 .map(|w| w.drain())
                 .unwrap_or_default();
-            for c in changes {
-                changed |= self.outside_change(&c.path, c.removed);
+            // A burst (git checkout, a code generator): one lint of the workspace instead of a
+            // process per file.
+            let bulk = changes.len() > BULK_CHANGES;
+            for c in &changes {
+                changed |= self.outside_change(&c.path, c.removed, bulk);
+            }
+            if bulk {
+                log::info!(
+                    "{} files changed outside: one workspace lint",
+                    changes.len()
+                );
+                self.lint_workspace(false);
             }
         }
         // Debounced re-parses.
@@ -371,8 +399,31 @@ impl Editor {
                 .is_none_or(|t| now.duration_since(t) >= SPIN)
         {
             self.tests.last_spin = Some(now);
-            changed = true;
-            self.refresh_problems_page();
+            // The spinners in tab titles and the status bar turn on every redraw; the pages'
+            // own spinner glyphs are redrawn by rebuilding them, which on a big page costs tens
+            // of milliseconds: those turn once a second.
+            let big = |l: Option<usize>| l.is_some_and(|n| n > BIG_PAGE_LINES);
+            let page_due = self
+                .tests
+                .last_page_spin
+                .is_none_or(|t| now.duration_since(t) >= BIG_PAGE_SPIN);
+            let tests_lines = self
+                .tests_page()
+                .map(|(p, i)| self.panes[p].docs[i].rope.len_lines());
+            let problems_lines = self
+                .find_doc(|d| d.virtual_name.as_deref() == Some(super::PROBLEMS_TITLE))
+                .map(|(p, i)| self.panes[p].docs[i].rope.len_lines());
+            if page_due || !big(problems_lines) {
+                self.refresh_problems_page();
+            }
+            // Changed data always shows at once.
+            if changed || page_due || !big(tests_lines) {
+                self.refresh_tests_page();
+            }
+            if page_due {
+                self.tests.last_page_spin = Some(now);
+            }
+            return true;
         } else if !busy {
             self.tests.last_spin = None;
         }
@@ -383,7 +434,7 @@ impl Editor {
     }
 
     /// A file changed outside the editor (watcher).
-    fn outside_change(&mut self, path: &Path, removed: bool) -> bool {
+    fn outside_change(&mut self, path: &Path, removed: bool, bulk: bool) -> bool {
         let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let open = self.find_doc(|d| d.canonical.as_deref() == Some(path.as_path()));
         let mut changed = false;
@@ -398,7 +449,7 @@ impl Editor {
                     .insert(path.clone(), Instant::now() + REPARSE_DELAY);
             }
         }
-        if !removed && open.is_none() {
+        if !removed && open.is_none() && !bulk {
             self.lint_file_on_disk(&path);
         }
         if !removed {
@@ -622,11 +673,13 @@ impl Editor {
                 .iter()
                 .filter(|t| t.status() == Status::Failed)
                 .collect(),
-            RunWhat::Tests(ids) => tree
-                .tests
-                .iter()
-                .filter(|t| ids.contains(&t.id) && t.runnable)
-                .collect(),
+            RunWhat::Tests(ids) => {
+                let ids: std::collections::HashSet<&String> = ids.iter().collect();
+                tree.tests
+                    .iter()
+                    .filter(|t| ids.contains(&t.id) && t.runnable)
+                    .collect()
+            }
             RunWhat::Suite(file, path, _) => tree
                 .tests
                 .iter()
@@ -672,8 +725,9 @@ impl Editor {
             let all_of_project = matches!(what, RunWhat::All);
             let dotnet = project.runner.is_some_and(Framework::is_dotnet);
             let mut files: Vec<PathBuf> = Vec::new();
+            let mut seen_files = std::collections::HashSet::new();
             for t in &tests {
-                if !files.contains(&t.file) {
+                if seen_files.insert(&t.file) {
                     files.push(t.file.clone());
                 }
             }
@@ -732,8 +786,9 @@ impl Editor {
         }
         for req in requests {
             self.tests.run_errors.remove(&req.project.root);
-            for (id, hash) in &req.ids {
-                if let Some(t) = self.tests.tree.tests.iter_mut().find(|t| &t.id == id) {
+            let wanted: HashMap<&String, u64> = req.ids.iter().map(|(id, h)| (id, *h)).collect();
+            for t in self.tests.tree.tests.iter_mut() {
+                if let Some(hash) = wanted.get(&t.id) {
                     t.running = true;
                     t.running_hash = *hash;
                 }
@@ -772,6 +827,7 @@ impl Editor {
             let ran: std::collections::HashSet<&str> =
                 job.request.ids.iter().map(|(id, _)| id.as_str()).collect();
             let (mut passed, mut failed) = (0, 0);
+            let outcomes = run::OutcomeIndex::new(&report.outcomes);
             for t in self.tests.tree.tests.iter_mut() {
                 if !t.file.starts_with(&root) {
                     continue;
@@ -782,7 +838,7 @@ impl Editor {
                     duration,
                     message,
                     detail,
-                }) = run::combine(&run::match_outcome(t, &report.outcomes))
+                }) = run::combine(&outcomes.matching(t))
                     // Runners list filtered-out tests as skipped: only tests that were asked
                     // for (or that actually ran) get a new result.
                     .filter(|c| was_running || c.status != Status::Skipped)
@@ -1057,6 +1113,7 @@ impl Editor {
             .unwrap_or(line);
         let doc = &mut self.panes[p].docs[i];
         doc.rope = Rope::from_str(&text);
+        crate::perf::bump(&crate::perf::PAGE_REBUILDS);
         doc.syntax.set_lang(Lang::Tests);
         doc.boxes = boxes;
         let line = new_line.min(doc.rope.len_lines().saturating_sub(1));
@@ -1103,15 +1160,21 @@ impl Editor {
                 '▾'
             }
         };
-        for project in &tree.projects {
-            let tests: Vec<&tx::TestCase> = tree
-                .tests
-                .iter()
-                .filter(|t| {
-                    tree.project_of(&t.file)
-                        .is_some_and(|p| p.root == project.root)
-                })
-                .collect();
+        // Group once: tests by project (one project lookup per file), then by file.
+        let selected = self.tests_selected_id();
+        let mut owner: HashMap<&Path, Option<usize>> = HashMap::new();
+        let mut by_project: Vec<Vec<&tx::TestCase>> = vec![Vec::new(); tree.projects.len()];
+        for t in &tree.tests {
+            let pi = *owner.entry(t.file.as_path()).or_insert_with(|| {
+                tree.project_of(&t.file)
+                    .and_then(|p| tree.projects.iter().position(|q| q.root == p.root))
+            });
+            if let Some(pi) = pi {
+                by_project[pi].push(t);
+            }
+        }
+        for (pi, project) in tree.projects.iter().enumerate() {
+            let tests = std::mem::take(&mut by_project[pi]);
             if tests.is_empty() {
                 continue;
             }
@@ -1140,15 +1203,16 @@ impl Editor {
             if self.tests.collapsed.contains(&row.key()) {
                 continue;
             }
-            let mut files: Vec<&PathBuf> = Vec::new();
+            let mut files: Vec<(&PathBuf, Vec<&tx::TestCase>)> = Vec::new();
+            let mut file_at: HashMap<&PathBuf, usize> = HashMap::new();
             for t in &tests {
-                if !files.contains(&&t.file) {
-                    files.push(&t.file);
-                }
+                let k = *file_at.entry(&t.file).or_insert_with(|| {
+                    files.push((&t.file, Vec::new()));
+                    files.len() - 1
+                });
+                files[k].1.push(t);
             }
-            for file in files {
-                let in_file: Vec<&tx::TestCase> =
-                    tests.iter().filter(|t| &t.file == file).copied().collect();
+            for (file, in_file) in files {
                 let row = TestRow::File(file.clone());
                 let rel = file
                     .strip_prefix(&project.root)
@@ -1165,7 +1229,7 @@ impl Editor {
                     Some(row.clone()),
                 ));
                 if !self.tests.collapsed.contains(&row.key()) {
-                    self.suite_lines(file, &[], &in_file, 4, &mut lines);
+                    self.suite_lines(file, &[], &in_file, 4, &mut lines, selected.as_deref());
                 }
             }
         }
@@ -1203,6 +1267,7 @@ impl Editor {
         tests: &[&tx::TestCase],
         indent: usize,
         lines: &mut Vec<(String, Option<TestRow>)>,
+        selected: Option<&str>,
     ) {
         let pad = " ".repeat(indent);
         // Items at this level: a test directly here, or the first test of a child suite.
@@ -1225,7 +1290,7 @@ impl Editor {
                 }
                 lines.push((s, Some(TestRow::Test(t.id.clone()))));
                 // The selected failed test shows its whole message in a box underneath.
-                if self.tests_selected_id().as_deref() == Some(t.id.as_str())
+                if selected == Some(t.id.as_str())
                     && let Some(r) = t.current_result()
                     && matches!(r.status, Status::Failed | Status::Skipped)
                     && let Some(text) = r.detail.as_ref().or(r.message.as_ref())
@@ -1265,7 +1330,7 @@ impl Editor {
                     Some(row),
                 ));
                 if !folded {
-                    self.suite_lines(file, &sub, &inside, indent + 2, lines);
+                    self.suite_lines(file, &sub, &inside, indent + 2, lines, selected);
                 }
             }
         }
@@ -1329,6 +1394,26 @@ impl Editor {
     /// A single click on the Tests page: on a group's arrow it folds the group, elsewhere it
     /// shows the row in the editor.
     /// The test whose row (or failure box) the Tests page cursor is on.
+    /// After the cursor moved on the Tests page: does the failure box have to move? (Only
+    /// then is the page rebuilt; on a big workspace that takes tens of milliseconds.)
+    pub(super) fn tests_box_moves(&self) -> bool {
+        let shown = self.tests.rows.iter().find_map(|r| match r {
+            Some(TestRow::Detail(id)) => Some(id.as_str()),
+            _ => None,
+        });
+        let selected = self.tests_selected_id();
+        let wanted = selected.as_deref().filter(|id| {
+            self.tests.tree.tests.iter().any(|t| {
+                t.id == *id
+                    && t.current_result().is_some_and(|r| {
+                        matches!(r.status, Status::Failed | Status::Skipped)
+                            && (r.detail.is_some() || r.message.is_some())
+                    })
+            })
+        });
+        shown != wanted
+    }
+
     fn tests_selected_id(&self) -> Option<String> {
         let (p, i) = self.tests_page()?;
         let doc = &self.panes[p].docs[i];
@@ -1374,7 +1459,9 @@ impl Editor {
         }
         let doc = self.doc_mut();
         doc.selection = Selection::point(doc.rope.line_to_char(k));
-        self.refresh_tests_page();
+        if self.tests_box_moves() {
+            self.refresh_tests_page();
+        }
         self.preview_test();
     }
 
@@ -1451,6 +1538,7 @@ impl Editor {
             .unwrap_or(0);
         let doc = &mut self.panes[p].docs[i];
         doc.rope = Rope::from_str(&text);
+        crate::perf::bump(&crate::perf::PAGE_REBUILDS);
         doc.syntax.set_lang(Lang::Tests);
         doc.boxes = boxes;
         doc.selection = Selection::point(doc.rope.line_to_char(line));
@@ -2070,7 +2158,7 @@ mod tests {
         assert!(ed.message.is_none(), "{:?}", ed.message); // quiet: no status message
         // A file changed outside the editor is linted from disk.
         fs::write(dir.join("src/a.js"), "let y = 2;\n").unwrap();
-        ed.outside_change(&dir.join("src/a.js"), false);
+        ed.outside_change(&dir.join("src/a.js"), false, false);
         assert!(
             ed.lint_jobs
                 .iter()

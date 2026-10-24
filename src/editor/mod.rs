@@ -140,6 +140,10 @@ pub struct Editor {
     pub hover: Option<hover::Hover>,
     /// Symbol index, parameter hints and Go Back history.
     pub symbols: symbols::SymbolState,
+    /// The compiled find query, by query text and options.
+    query_cache: std::cell::RefCell<Option<(String, SearchOptions, Option<Query>)>>,
+    /// Highlighting did not reach the visible lines in the last frame's budget.
+    pub syntax_pending: bool,
     /// The place a list just showed in the editor (highlighted there).
     pub located: Option<linting::Located>,
     /// Find All References: the last search and its page.
@@ -195,6 +199,8 @@ impl Editor {
             symbols: symbols::SymbolState::default(),
             refs: references::RefState::default(),
             located: None,
+            syntax_pending: false,
+            query_cache: Default::default(),
             launch_urls: !cfg!(test),
             opened_url: None,
             clipboard,
@@ -751,7 +757,7 @@ impl Editor {
             self.preview_test();
         }
         // Paging may land on a failure box: keep the box with the selected test.
-        if matches!(cmd, Move(..)) && self.on_tests_page() {
+        if matches!(cmd, Move(..)) && self.on_tests_page() && self.tests_box_moves() {
             self.refresh_tests_page();
         }
         if matches!(cmd, Move(..)) && self.on_problems_page() {
@@ -774,14 +780,19 @@ impl Editor {
     }
 
     /// Compute highlighting state down to the last visible line of every shown document.
+    /// Bring highlighting up to the visible lines, within a frame's time budget; what is
+    /// left sets `syntax_pending` (the next frame continues).
     pub fn update_syntax(&mut self) {
+        let deadline = Instant::now() + SYNTAX_BUDGET;
+        let mut pending = false;
         for pane in &mut self.panes {
             let rows = pane.rows;
             if let Some(doc) = pane.docs.get_mut(pane.active) {
                 let last = doc.view.top_line + rows + 1;
-                doc.syntax.ensure(&doc.rope, last);
+                pending |= !doc.syntax.ensure(&doc.rope, last, Some(deadline));
             }
         }
+        self.syntax_pending = pending;
     }
 
     pub fn focus_view(&mut self, pane: usize) {
@@ -2192,9 +2203,24 @@ impl Editor {
             Some(Minibuffer {
                 kind: PromptKind::Find { .. },
                 ..
-            }) => Query::new(&self.find_query, self.search_opts)
-                .ok()
-                .flatten(),
+            }) => {
+                // Compiled once per query text and options, not on every frame.
+                let mut cache = self.query_cache.borrow_mut();
+                match &*cache {
+                    Some((text, opts, q))
+                        if *text == self.find_query && *opts == self.search_opts =>
+                    {
+                        q.clone()
+                    }
+                    _ => {
+                        let q = Query::new(&self.find_query, self.search_opts)
+                            .ok()
+                            .flatten();
+                        *cache = Some((self.find_query.clone(), self.search_opts, q.clone()));
+                        q
+                    }
+                }
+            }
             _ => None,
         }
     }
@@ -2256,6 +2282,9 @@ fn picker_kind_for(cmd: Command) -> Option<PickerKind> {
         _ => None,
     }
 }
+
+/// Time per frame for highlighting (the rest continues in the next frames).
+const SYNTAX_BUDGET: Duration = Duration::from_millis(6);
 
 /// Files indexed for Quick Open at most.
 const QUICK_OPEN_LIMIT: usize = 100_000;

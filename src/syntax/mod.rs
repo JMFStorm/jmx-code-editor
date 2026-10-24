@@ -14,6 +14,10 @@ mod tests_page;
 
 use std::path::Path;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::Instant;
+
 use ropey::Rope;
 
 /// Lines longer than this (minified files) are not highlighted.
@@ -126,6 +130,7 @@ pub struct State {
 
 /// Highlight one line (without its newline) starting in `state`.
 pub fn highlight_line(lang: Lang, state: &State, line: &str) -> (Vec<Span>, State) {
+    crate::perf::bump(&crate::perf::LINES_LEXED);
     let mut st = state.clone();
     let chars: Vec<char> = line.chars().collect();
     if chars.len() > MAX_LINE_CHARS {
@@ -229,19 +234,37 @@ impl<'a> Lexer<'a> {
 }
 
 /// Per-document highlighting: the language and the lexer state at each line start (as far as
-/// it has been computed).
+/// it has been computed), plus the spans of recently drawn lines.
+///
+/// After an edit only the edited lines are re-lexed, and lexing stops as soon as a line starts
+/// in the same state as before (the rest of the file is unchanged). Lexing far ahead (Ctrl+End
+/// in a huge file) is spread over frames by a time budget.
 #[derive(Debug, Clone, Default)]
 pub struct Syntax {
     pub lang: Lang,
-    /// `states[i]` is the state at the start of line `i`; always holds at least line 0.
+    /// `states[i]` is the state at the start of line `i`. Entries after `valid` are from
+    /// before the last edit (shifted to their new lines) and may be out of date.
     states: Vec<State>,
+    /// `states[..=valid]` are correct.
+    valid: usize,
+    /// The pending edits end at this line: past it, a state equal to the old one means the
+    /// rest is unchanged. `None`: no such shortcut (several edits at once; re-lex everything).
+    dirty_end: Option<usize>,
+    /// Line count when the states were last brought up to date (to learn an edit's shift).
+    lines: usize,
+    /// Spans of recently drawn lines.
+    spans: RefCell<HashMap<usize, Vec<Span>>>,
 }
+
+/// Spans kept at most (a few screens).
+const SPAN_CACHE: usize = 2000;
 
 impl Syntax {
     pub fn new(lang: Lang) -> Self {
         Self {
             lang,
             states: vec![State::default()],
+            ..Default::default()
         }
     }
 
@@ -249,36 +272,121 @@ impl Syntax {
         *self = Self::new(lang);
     }
 
-    /// Text changed on `line`: states after it must be recomputed.
+    /// Text changed from `line` on: states after it must be recomputed.
     pub fn invalidate_from(&mut self, line: usize) {
-        self.states.truncate(line + 1);
-        if self.states.is_empty() {
-            self.states.push(State::default());
-        }
+        self.valid = self
+            .valid
+            .min(line)
+            .min(self.states.len().saturating_sub(1));
+        self.dirty_end = None;
+        self.spans.borrow_mut().retain(|&l, _| l < line);
     }
 
-    /// Compute line start states up to `line` (inclusive).
-    pub fn ensure(&mut self, rope: &Rope, line: usize) {
-        if self.lang == Lang::Plain {
+    /// One edit replaced lines `first..` of the old text with lines `first..=last` of the new
+    /// text, the document now having `lines` lines: keep the states after it (shifted), so
+    /// re-lexing can stop where the old and new states agree again.
+    pub fn edited(&mut self, first: usize, last: usize, lines: usize) {
+        if self.lines == 0 || self.states.len() <= first + 1 {
+            self.invalidate_from(first);
+            self.lines = lines;
             return;
         }
-        let last = line.min(rope.len_lines().saturating_sub(1));
-        while self.states.len() <= last {
-            let l = self.states.len() - 1;
-            let text = line_text(rope, l);
-            let (_, next) = highlight_line(self.lang, &self.states[l], &text);
-            self.states.push(next);
+        let delta = lines as isize - self.lines as isize;
+        let old_last = (last as isize - delta).max(first as isize) as usize;
+        let from = first + 1;
+        let to = (old_last + 1).min(self.states.len()).max(from);
+        let fresh = last - first;
+        // Another edit still pending: its region moves with this one, and both are dirty.
+        let pending = self.valid + 1 < self.states.len();
+        self.states
+            .splice(from..to, std::iter::repeat_n(State::default(), fresh));
+        self.dirty_end = if pending {
+            self.dirty_end.map(|e| {
+                let e = if e > first {
+                    (e as isize + delta).max(first as isize) as usize
+                } else {
+                    e
+                };
+                e.max(last)
+            })
+        } else {
+            Some(last)
+        };
+        self.valid = self.valid.min(first);
+        self.lines = lines;
+        self.spans.borrow_mut().retain(|&l, _| l < first);
+    }
+
+    /// Compute line start states up to `line` (inclusive), stopping at `deadline`. Returns
+    /// false when it ran out of time (draw what is known; call again next frame).
+    pub fn ensure(&mut self, rope: &Rope, line: usize, deadline: Option<Instant>) -> bool {
+        if self.lang == Lang::Plain {
+            return true;
         }
+        let total = rope.len_lines();
+        self.lines = total;
+        let last = line.min(total.saturating_sub(1));
+        let mut n = 0u32;
+        while self.valid < last {
+            let l = self.valid;
+            let (spans, next) = lex_line(self.lang, &self.states[l], rope, l);
+            // Lines just before the viewport are about to be drawn: keep their spans.
+            if l + SPAN_CACHE_LINES_AHEAD >= last {
+                self.spans.borrow_mut().insert(l, spans);
+            }
+            if l + 1 < self.states.len() {
+                // Past the edit and back in step: the rest is as before.
+                if self.dirty_end.is_some_and(|e| l + 1 > e) && self.states[l + 1] == next {
+                    self.states.truncate(total.max(1));
+                    self.valid = self.states.len() - 1;
+                    continue;
+                }
+                if self.states[l + 1] != next {
+                    self.spans.borrow_mut().remove(&(l + 1));
+                }
+                self.states[l + 1] = next;
+            } else {
+                self.states.push(next);
+            }
+            self.valid = l + 1;
+            n += 1;
+            if n.is_multiple_of(256) && deadline.is_some_and(|d| Instant::now() >= d) {
+                return false;
+            }
+        }
+        self.states.truncate(total.max(1));
+        true
     }
 
     /// Spans of `line`, if its start state is known (see `ensure`).
     pub fn line_spans(&self, rope: &Rope, line: usize) -> Option<Vec<Span>> {
-        if self.lang == Lang::Plain {
+        if self.lang == Lang::Plain || line > self.valid {
             return None;
         }
+        if let Some(s) = self.spans.borrow().get(&line) {
+            return Some(s.clone());
+        }
         let state = self.states.get(line)?;
-        Some(highlight_line(self.lang, state, &line_text(rope, line)).0)
+        let spans = lex_line(self.lang, state, rope, line).0;
+        let mut cache = self.spans.borrow_mut();
+        if cache.len() >= SPAN_CACHE {
+            cache.clear();
+        }
+        cache.insert(line, spans.clone());
+        Some(spans)
     }
+}
+
+/// Lines before the viewport whose spans are kept while lexing up to it.
+const SPAN_CACHE_LINES_AHEAD: usize = 200;
+
+/// Lex line `l` from `state`; lines longer than `MAX_LINE_CHARS` are left plain without
+/// copying them out of the rope.
+fn lex_line(lang: Lang, state: &State, rope: &Rope, l: usize) -> (Vec<Span>, State) {
+    if rope.line(l).len_chars() > MAX_LINE_CHARS + 2 {
+        return (Vec::new(), state.clone());
+    }
+    highlight_line(lang, state, &line_text(rope, l))
 }
 
 fn line_text(rope: &Rope, line: usize) -> String {
@@ -322,6 +430,69 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Incremental highlighting after edits (states kept and shifted, re-lexing stopped where
+    /// old and new states agree, budgeted) must equal a full re-lex, for random edits that
+    /// add and remove lines and open and close comments and strings.
+    #[test]
+    fn incremental_states_match_a_full_relex() {
+        let base = "function a(x) {\n  /* c */ const s = `t ${x}`;\n  return 'q';\n}\n// end\n";
+        let mut rope = Rope::from_str(&base.repeat(40));
+        let mut syn = Syntax::new(Lang::JavaScript);
+        let lines = rope.len_lines();
+        assert!(syn.ensure(&rope, lines, None));
+        let pieces = ["/*", "*/", "\n", "`", "'", "x", "\n\n", "// c\n", "${", "}"];
+        let mut seed = 7u64;
+        let mut rnd = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for round in 0..300 {
+            let len = rope.len_chars();
+            let pos = rnd(len.max(1));
+            let (first, last) = if round % 3 == 0 && len > 10 {
+                // A deletion (possibly over line breaks).
+                let end = (pos + rnd(12)).min(len);
+                rope.remove(pos..end);
+                let l = rope.char_to_line(pos.min(rope.len_chars()));
+                (l, l)
+            } else {
+                let text = pieces[rnd(pieces.len())];
+                rope.insert(pos, text);
+                let f = rope.char_to_line(pos);
+                (f, rope.char_to_line(pos + text.chars().count()).max(f))
+            };
+            syn.edited(first, last, rope.len_lines());
+            // Sometimes several edits before the next update; sometimes a budgeted update.
+            if round % 4 != 1 {
+                while !syn.ensure(&rope, rope.len_lines(), Some(Instant::now())) {}
+            }
+            if round % 4 == 3 {
+                let mut full = Syntax::new(Lang::JavaScript);
+                full.ensure(&rope, rope.len_lines(), None);
+                let n = rope.len_lines();
+                assert_eq!(syn.states[..n], full.states[..n], "round {round}");
+                for l in 0..n {
+                    assert_eq!(
+                        syn.line_spans(&rope, l),
+                        full.line_spans(&rope, l),
+                        "round {round} line {l}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_lines_are_not_materialized() {
+        let rope = Rope::from_str(&format!("{}\nlet a = 1;\n", "x".repeat(MAX_LINE_CHARS * 3)));
+        let mut syn = Syntax::new(Lang::JavaScript);
+        assert!(syn.ensure(&rope, 2, None));
+        assert_eq!(syn.line_spans(&rope, 0), Some(Vec::new()));
+        assert!(!syn.line_spans(&rope, 1).unwrap().is_empty());
+    }
 
     #[test]
     fn languages_from_paths() {
@@ -375,15 +546,26 @@ mod tests {
     fn states_are_cached_and_invalidated() {
         let mut rope = Rope::from_str("/* a\nb */ x\nlet y = 1;\n");
         let mut syn = Syntax::new(Lang::JavaScript);
-        syn.ensure(&rope, 10);
+        syn.ensure(&rope, 10, None);
         assert_eq!(syn.states.len(), 4);
         let spans = syn.line_spans(&rope, 1).unwrap();
         assert_eq!(spans[0].token, Token::Comment); // still inside the comment
         // Remove the comment start: line 1 is code again after invalidation.
         rope.remove(0..2);
         syn.invalidate_from(0);
-        assert_eq!(syn.states.len(), 1);
-        syn.ensure(&rope, 2);
+        assert_eq!(syn.valid, 0);
+        assert_eq!(
+            syn.line_spans(&rope, 1),
+            None,
+            "not known until lexed again"
+        );
+        syn.ensure(&rope, 2, None);
+        let line1 = syn.line_spans(&rope, 1).unwrap();
+        assert!(
+            !line1
+                .iter()
+                .any(|s| s.start == 0 && s.token == Token::Comment)
+        );
         let spans = syn.line_spans(&rope, 2).unwrap();
         assert_eq!(spans[0].token, Token::Keyword);
     }

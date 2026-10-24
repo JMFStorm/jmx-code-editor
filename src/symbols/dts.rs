@@ -26,6 +26,10 @@ pub struct DtsFile {
 }
 
 pub fn scan(src: &str) -> DtsFile {
+    super::with_line_index(|| scan_text(src))
+}
+
+fn scan_text(src: &str) -> DtsFile {
     let toks = tokenize(src);
     let mut out = DtsFile::default();
     // Open braces: true when transparent (`declare module '…' {`, `namespace X {`).

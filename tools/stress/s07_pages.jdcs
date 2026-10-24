@@ -1,0 +1,10 @@
+wait 300
+perf ready
+key ctrl+shift+t
+perf tests-page
+keys down 100
+perf tests-arrows
+key ctrl+shift+u
+perf problems-page
+keys down 100
+perf problems-arrows

@@ -122,7 +122,7 @@ impl Editor {
         let linted = self.poll_lint();
         self.track_test_edits();
         let tested = self.poll_tests();
-        let indexed = self.poll_symbols();
+        let indexed = self.poll_symbols() | self.poll_live_symbols();
         let referenced = self.poll_references();
         self.poll_search() || formatted || linted || tested || indexed || referenced
     }
@@ -171,10 +171,15 @@ impl Editor {
         } else {
             None
         };
-        [self.find.debounce_at, poll, self.tests_deadline()]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.find.debounce_at,
+            poll,
+            self.tests_deadline(),
+            self.live_symbols_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Background work still running or scheduled.

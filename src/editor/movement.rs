@@ -171,10 +171,61 @@ pub fn col_of(rope: &Rope, pos: usize, tab_width: usize) -> usize {
 /// Display width of a slice that starts at display column `start_col`.
 pub fn width_of(slice: RopeSlice, start_col: usize, tab_width: usize) -> usize {
     let mut col = start_col;
-    for c in slice.chars() {
-        col += char_width(c, col, tab_width);
+    // ASCII fast path over the raw chunks (minified files have megabyte-long lines).
+    for chunk in slice.chunks() {
+        let bytes = chunk.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b < 0x80 {
+                col += if b == b'\t' {
+                    tab_width - col % tab_width
+                } else {
+                    1
+                };
+                i += 1;
+            } else {
+                let c = chunk[i..].chars().next().unwrap_or(' ');
+                col += char_width(c, col, tab_width);
+                i += c.len_utf8();
+            }
+        }
     }
     col - start_col
+}
+
+/// The first char of `slice` that reaches past display column `target`, and the column it
+/// starts at (`(len, width)` when the slice is narrower).
+pub fn skip_to_col(slice: RopeSlice, target: usize, tab_width: usize) -> (usize, usize) {
+    let mut col = 0;
+    let mut idx = 0;
+    for chunk in slice.chunks() {
+        let bytes = chunk.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            let (w, len) = if b < 0x80 {
+                (
+                    if b == b'\t' {
+                        tab_width - col % tab_width
+                    } else {
+                        1
+                    },
+                    1,
+                )
+            } else {
+                let c = chunk[i..].chars().next().unwrap_or(' ');
+                (char_width(c, col, tab_width), c.len_utf8())
+            };
+            if col + w > target {
+                return (idx, col);
+            }
+            col += w;
+            idx += 1;
+            i += len;
+        }
+    }
+    (idx, col)
 }
 
 /// Char index in `line` at display column `target` (or the line end if shorter).
@@ -197,6 +248,47 @@ pub fn pos_at_col(rope: &Rope, line: usize, target: usize, tab_width: usize) -> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn fast_widths_match_char_by_char() {
+        let slow = |s: &str, start: usize| {
+            let mut col = start;
+            for c in s.chars() {
+                col += char_width(c, col, 4);
+            }
+            col - start
+        };
+        for s in [
+            "",
+            "abc",
+            "a\tb\t\tc",
+            "漢字x\t界",
+            "e\u{301}\u{1}z",
+            "😀\tq",
+        ] {
+            let rope = Rope::from_str(s);
+            for start in 0..5 {
+                assert_eq!(
+                    width_of(rope.slice(..), start, 4),
+                    slow(s, start),
+                    "{s:?} @{start}"
+                );
+            }
+            let total = slow(s, 0);
+            for target in 0..total + 2 {
+                let (idx, col) = skip_to_col(rope.slice(..), target, 4);
+                // The char at `idx` starts at `col` and reaches past `target`.
+                let before: String = s.chars().take(idx).collect();
+                assert_eq!(slow(&before, 0), col, "{s:?} -> {target}");
+                if let Some(c) = s.chars().nth(idx) {
+                    assert!(col + char_width(c, col, 4) > target);
+                } else {
+                    assert!(col <= target);
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

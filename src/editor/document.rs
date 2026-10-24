@@ -258,7 +258,7 @@ impl Document {
         if changes.is_empty() {
             return;
         }
-        self.text_changed(&changes);
+        self.text_changed(&changes, false);
         self.history.record(kind, changes, before, after);
         self.selection = after.clamp(self.rope.len_chars());
         self.goal_col = None;
@@ -371,7 +371,7 @@ impl Document {
                 .remove(c.start..c.start + c.inserted.chars().count());
             self.rope.insert(c.start, &c.removed);
         }
-        self.text_changed(&t.changes);
+        self.text_changed(&t.changes, true);
         self.selection = t.before.clamp(self.rope.len_chars());
         self.goal_col = None;
         true
@@ -382,23 +382,38 @@ impl Document {
         let Some(t) = self.history.pop_redo() else {
             return false;
         };
-        for c in &t.changes {
+        for c in t.changes.iter() {
             self.rope
                 .remove(c.start..c.start + c.removed.chars().count());
             self.rope.insert(c.start, &c.inserted);
         }
-        self.text_changed(&t.changes);
+        self.text_changed(&t.changes, false);
         self.selection = t.after.clamp(self.rope.len_chars());
         self.goal_col = None;
         true
     }
 
-    /// Highlighting from the first changed line on is out of date.
-    fn text_changed(&mut self, changes: &[Change]) {
+    /// Highlighting from the first changed line on is out of date. `undone`: the changes were
+    /// reverted (the text now holds what they removed).
+    fn text_changed(&mut self, changes: &[Change], undone: bool) {
         self.revision += 1;
-        if let Some(first) = changes.iter().map(|c| c.start).min() {
-            let pos = first.min(self.rope.len_chars());
-            self.syntax.invalidate_from(self.rope.char_to_line(pos));
+        let len = self.rope.len_chars();
+        match changes {
+            // One edit (typing, paste, delete): only its lines are re-lexed until the old and
+            // new states agree again.
+            [c] => {
+                let first = self.rope.char_to_line(c.start.min(len));
+                let now = if undone { &c.removed } else { &c.inserted };
+                let end = (c.start + now.chars().count()).min(len);
+                let last = self.rope.char_to_line(end).max(first);
+                self.syntax.edited(first, last, self.rope.len_lines());
+            }
+            _ => {
+                if let Some(first) = changes.iter().map(|c| c.start).min() {
+                    let pos = first.min(len);
+                    self.syntax.invalidate_from(self.rope.char_to_line(pos));
+                }
+            }
         }
     }
 

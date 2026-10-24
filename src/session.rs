@@ -141,6 +141,7 @@ impl Session {
 
     /// Render one frame. Returns false if it was skipped and should be retried.
     pub fn draw(&mut self, renderer: &mut Renderer, cursor_on: bool) -> bool {
+        crate::perf::bump(&crate::perf::FRAMES);
         let started = Instant::now();
         self.relayout(renderer);
         self.editor.update_syntax();

@@ -1,0 +1,7 @@
+wait 300
+perf ready
+key ctrl+p
+perf picker-open
+typef pkg12mod0
+perf typed
+key esc

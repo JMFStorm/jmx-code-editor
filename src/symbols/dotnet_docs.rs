@@ -802,7 +802,7 @@ impl DotnetDocs {
         let names = self
             .types
             .get(ty)
-            .map(|i| self.doc(*i).typeparams)
+            .map(|i| self.doc(*i).typeparams.clone())
             .unwrap_or_default();
         (0..arity)
             .map(|k| names.get(k).cloned().unwrap_or_else(|| format!("T{k}")))

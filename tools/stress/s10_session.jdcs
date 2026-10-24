@@ -1,0 +1,11 @@
+wait 300
+perf ready
+key ctrl+p
+type pkg03mod0001js
+key enter
+keys ctrl+end 1
+typef function longSessionEdits(a, b) { return a + b; } // typed text of a longer session that keeps going and going
+keys enter 200
+keys ctrl+z 300
+keys ctrl+y 300
+perf session

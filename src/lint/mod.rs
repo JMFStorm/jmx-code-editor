@@ -89,18 +89,43 @@ pub struct Diagnostic {
 #[derive(Debug, Default)]
 pub struct Problems {
     files: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    /// Errors, warnings and messages over all files (kept up to date: read every frame).
+    totals: [usize; 3],
+    /// Bumped on every change (pages rebuild only when it moved).
+    pub version: u64,
+}
+
+fn tally(list: &[Diagnostic]) -> [usize; 3] {
+    let mut t = [0; 3];
+    for d in list {
+        t[match d.severity {
+            Severity::Error => 0,
+            Severity::Warning => 1,
+            Severity::Info => 2,
+        }] += 1;
+    }
+    t
 }
 
 impl Problems {
     /// Replace `source`'s diagnostics for one file.
     pub fn set_file(&mut self, source: Source, path: &Path, diags: Vec<Diagnostic>) {
+        if diags.is_empty() && !self.files.contains_key(path) {
+            return;
+        }
         let list = self.files.entry(path.to_path_buf()).or_default();
+        let before = tally(list);
         list.retain(|d| d.source != source);
         list.extend(diags);
         list.sort_by_key(|d| (d.line, d.col, d.severity));
+        let after = tally(list);
+        for k in 0..3 {
+            self.totals[k] = self.totals[k] + after[k] - before[k];
+        }
         if list.is_empty() {
             self.files.remove(path);
         }
+        self.version += 1;
     }
 
     /// Replace all of `source`'s diagnostics under `root` (a workspace lint) with `files`.
@@ -130,24 +155,12 @@ impl Problems {
 
     /// (errors, warnings) over all files.
     pub fn counts(&self) -> (usize, usize) {
-        let all = self.files.values().flatten();
-        all.fold((0, 0), |(e, w), d| match d.severity {
-            Severity::Error => (e + 1, w),
-            Severity::Warning => (e, w + 1),
-            Severity::Info => (e, w),
-        })
+        (self.totals[0], self.totals[1])
     }
 
     /// (errors, warnings, messages) over all files.
     pub fn counts3(&self) -> (usize, usize, usize) {
-        self.files
-            .values()
-            .flatten()
-            .fold((0, 0, 0), |(e, w, i), d| match d.severity {
-                Severity::Error => (e + 1, w, i),
-                Severity::Warning => (e, w + 1, i),
-                Severity::Info => (e, w, i + 1),
-            })
+        (self.totals[0], self.totals[1], self.totals[2])
     }
 
     pub fn file_count(&self) -> usize {
