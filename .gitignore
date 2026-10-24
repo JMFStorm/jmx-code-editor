@@ -1,0 +1,15 @@
+# Rust build output
+/target
+
+# Mock projects used for manually testing the editor
+/sandbox/
+
+# Editor atomic-save temp files
+*.jmx-tmp
+
+# IDE / OS clutter
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
