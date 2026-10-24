@@ -29,6 +29,8 @@ const BUILD_DELAY: Duration = Duration::from_millis(500);
 /// How often the file watcher and background jobs are checked.
 pub(super) const TEST_POLL: Duration = Duration::from_millis(50);
 const WATCH_POLL: Duration = Duration::from_millis(500);
+/// Spinner frame time.
+const SPIN: Duration = Duration::from_millis(100);
 
 /// A line of the Tests page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,8 @@ pub enum TestRow {
     /// A `describe` block or C# class: file and suite path.
     Suite(PathBuf, Vec<String>),
     Test(String),
+    /// A line of the failure box under the selected test.
+    Detail(String),
 }
 
 impl TestRow {
@@ -47,11 +51,12 @@ impl TestRow {
             TestRow::File(p) => format!("f:{}", p.display()),
             TestRow::Suite(p, path) => format!("s:{}::{}", p.display(), path.join("\u{1f}")),
             TestRow::Test(id) => format!("t:{id}"),
+            TestRow::Detail(id) => format!("d:{id}"),
         }
     }
 
     fn is_group(&self) -> bool {
-        !matches!(self, TestRow::Test(_))
+        !matches!(self, TestRow::Test(_) | TestRow::Detail(_))
     }
 }
 
@@ -112,6 +117,8 @@ pub struct TestState {
     /// Results of the projects in the current run, summed up when the last one finishes.
     batch: Vec<(String, bool)>,
     batch_started: Option<Instant>,
+    /// Last spinner frame drawn while something runs.
+    last_spin: Option<Instant>,
     /// Test project roots to re-scan, when (runner or framework config changed).
     rescan_wanted: HashMap<PathBuf, Instant>,
 }
@@ -136,6 +143,12 @@ impl Editor {
             .watcher
             .as_ref()
             .map(|_| Instant::now() + WATCH_POLL);
+        // Check the whole project right away: ESLint everywhere, and a build of every C#
+        // project (when dotnet is installed), quietly in the background.
+        if !folders.is_empty() {
+            self.lint_workspace(false);
+            self.build_workspace();
+        }
         self.scan_tests(folders);
     }
 
@@ -345,6 +358,20 @@ impl Editor {
         }
         changed |= self.poll_test_jobs();
         changed |= self.poll_checks(now);
+        // Keep the spinners turning while tests, lints or builds run.
+        let busy = !self.tests.jobs.is_empty() || self.linting() || self.tests_building();
+        if busy
+            && self
+                .tests
+                .last_spin
+                .is_none_or(|t| now.duration_since(t) >= SPIN)
+        {
+            self.tests.last_spin = Some(now);
+            changed = true;
+            self.refresh_problems_page();
+        } else if !busy {
+            self.tests.last_spin = None;
+        }
         if changed {
             self.refresh_tests_page();
         }
@@ -365,6 +392,9 @@ impl Editor {
                     .reparse
                     .insert(path.clone(), Instant::now() + REPARSE_DELAY);
             }
+        }
+        if !removed && open.is_none() {
+            self.lint_file_on_disk(&path);
         }
         if !removed {
             self.config_changed(&path);
@@ -457,14 +487,21 @@ impl Editor {
     /// Start due builds, lints and rescans; collect finished builds.
     fn poll_checks(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        // Builds: one per project at a time; a wanted build waits for a running one.
-        let due: Vec<PathBuf> = self
-            .tests
-            .build_wanted
-            .iter()
-            .filter(|(p, t)| now >= **t && !self.tests.builds.iter().any(|b| &b.csproj == *p))
-            .map(|(p, _)| p.clone())
-            .collect();
+        // Builds: one at a time (projects that reference each other share outputs); the
+        // next wanted build starts when the running one is done.
+        let due: Vec<PathBuf> = if self.tests.builds.is_empty() {
+            let mut ready: Vec<&PathBuf> = self
+                .tests
+                .build_wanted
+                .iter()
+                .filter(|(_, t)| now >= **t)
+                .map(|(p, _)| p)
+                .collect();
+            ready.sort();
+            ready.into_iter().take(1).cloned().collect()
+        } else {
+            Vec::new()
+        };
         for csproj in due {
             self.tests.build_wanted.remove(&csproj);
             match run::find_dotnet() {
@@ -735,11 +772,15 @@ impl Editor {
                     continue;
                 }
                 let was_running = ran.contains(t.id.as_str());
-                if let Some((status, duration, message)) =
-                    run::combine(&run::match_outcome(t, &report.outcomes))
-                        // Runners list filtered-out tests as skipped: only tests that were asked
-                        // for (or that actually ran) get a new result.
-                        .filter(|(status, _, _)| was_running || *status != Status::Skipped)
+                if let Some(run::Combined {
+                    status,
+                    duration,
+                    message,
+                    detail,
+                }) = run::combine(&run::match_outcome(t, &report.outcomes))
+                    // Runners list filtered-out tests as skipped: only tests that were asked
+                    // for (or that actually ran) get a new result.
+                    .filter(|c| was_running || c.status != Status::Skipped)
                 {
                     // The result belongs to the text that ran.
                     let hash = if was_running {
@@ -751,6 +792,7 @@ impl Editor {
                         status,
                         duration,
                         message,
+                        detail,
                         hash,
                     });
                     match status {
@@ -823,7 +865,9 @@ impl Editor {
     pub(super) fn run_test_at_cursor(&mut self) {
         if self.on_tests_page() {
             match self.tests_cursor_row() {
-                Some(TestRow::Test(id)) => self.run_tests(RunWhat::Tests(vec![id])),
+                Some(TestRow::Test(id) | TestRow::Detail(id)) => {
+                    self.run_tests(RunWhat::Tests(vec![id]))
+                }
                 Some(TestRow::Suite(f, path)) => {
                     let full = self
                         .tests
@@ -890,7 +934,8 @@ impl Editor {
             .tree
             .tests
             .iter()
-            .find(|t| &t.file == path && t.found.line == line)?;
+            .filter(|t| &t.file == path && t.found.line <= line && line <= t.found.end_line)
+            .max_by_key(|t| t.found.line)?;
         let r = t.current_result()?;
         (r.status == Status::Failed).then(|| {
             format!(
@@ -909,6 +954,11 @@ impl Editor {
             .filter(|t| t.file == path)
             .map(|t| (t.found.line, t.status()))
             .collect()
+    }
+
+    /// A C# build is running or about to start.
+    pub(super) fn tests_building(&self) -> bool {
+        !self.tests.builds.is_empty() || !self.tests.build_wanted.is_empty()
     }
 
     pub(super) fn tests_busy(&self) -> bool {
@@ -980,7 +1030,16 @@ impl Editor {
         };
         let doc = &self.panes[p].docs[i];
         let line = doc.rope.char_to_line(doc.selection.head);
-        let keep = self.tests.rows.get(line).cloned().flatten();
+        let keep = self
+            .tests
+            .rows
+            .get(line)
+            .cloned()
+            .flatten()
+            .map(|r| match r {
+                TestRow::Detail(id) => TestRow::Test(id),
+                other => other,
+            });
         let (text, rows) = self.tests_text();
         if self.panes[p].docs[i].rope == text.as_str() {
             self.tests.rows = rows;
@@ -1003,7 +1062,10 @@ impl Editor {
         let mut lines: Vec<(String, Option<TestRow>)> = Vec::new();
         let mut head = format!("Tests: {passed} passed · {failed} failed · {not_run} not run");
         if running > 0 {
-            head.push_str(&format!(" · {running} running"));
+            head.push_str(&format!(
+                " · {} {running} running",
+                super::linting::spinner()
+            ));
         }
         if !self.tests.scans.is_empty() {
             head.push_str("   (finding tests…)");
@@ -1141,6 +1203,25 @@ impl Editor {
                     _ => {}
                 }
                 lines.push((s, Some(TestRow::Test(t.id.clone()))));
+                // The selected failed test shows its whole message in a box underneath.
+                if self.tests_selected_id().as_deref() == Some(t.id.as_str())
+                    && let Some(r) = t.current_result()
+                    && matches!(r.status, Status::Failed | Status::Skipped)
+                    && let Some(text) = r.detail.as_ref().or(r.message.as_ref())
+                {
+                    let indent = indent + 4;
+                    let width = self.panes[super::PANEL]
+                        .cols
+                        .saturating_sub(indent + 3)
+                        .max(20);
+                    let root = self.tests.tree.project_of(&t.file).map(|p| p.root.clone());
+                    for l in wrap_text(&tidy_failure(text, root.as_deref()), width) {
+                        lines.push((
+                            format!("{}│ {l}", " ".repeat(indent)),
+                            Some(TestRow::Detail(t.id.clone())),
+                        ));
+                    }
+                }
             } else if suite.len() > path.len() && suite.starts_with(path) {
                 let name = suite[path.len()].clone();
                 if seen_suites.contains(&name) {
@@ -1181,7 +1262,7 @@ impl Editor {
     fn row_target(&self, row: &TestRow) -> Option<Target> {
         let tree = &self.tests.tree;
         let (path, line) = match row {
-            TestRow::Test(id) => {
+            TestRow::Test(id) | TestRow::Detail(id) => {
                 let t = tree.tests.iter().find(|t| &t.id == id)?;
                 (t.file.clone(), t.found.line)
             }
@@ -1229,6 +1310,63 @@ impl Editor {
 
     /// A single click on the Tests page: on a group's arrow it folds the group, elsewhere it
     /// shows the row in the editor.
+    /// The test whose row (or failure box) the Tests page cursor is on.
+    fn tests_selected_id(&self) -> Option<String> {
+        let (p, i) = self.tests_page()?;
+        let doc = &self.panes[p].docs[i];
+        let line = doc.rope.char_to_line(doc.selection.head);
+        match self.tests.rows.get(line).cloned().flatten()? {
+            TestRow::Test(id) | TestRow::Detail(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Page lines of the failure box, for drawing it.
+    pub fn tests_detail_lines(&self) -> Option<(usize, usize)> {
+        let is_detail = |r: &Option<TestRow>| matches!(r, Some(TestRow::Detail(_)));
+        let first = self.tests.rows.iter().position(is_detail)?;
+        let last = self.tests.rows.iter().rposition(is_detail)?;
+        Some((first, last))
+    }
+
+    /// Up/Down on the Tests page: the previous / next row, skipping the failure box.
+    pub(super) fn tests_step(&mut self, delta: isize) {
+        let doc = self.doc();
+        let line = doc.rope.char_to_line(doc.selection.head) as isize;
+        let rows = &self.tests.rows;
+        let mut k = line;
+        loop {
+            k += delta;
+            if k < 0 || k as usize >= rows.len() {
+                return;
+            }
+            match &rows[k as usize] {
+                Some(TestRow::Detail(_)) | None => continue,
+                Some(_) => break,
+            }
+        }
+        let doc = self.doc_mut();
+        doc.selection = Selection::point(doc.rope.line_to_char(k as usize));
+        self.refresh_tests_page();
+        self.preview_test();
+    }
+
+    /// Copy the selected test's whole failure message.
+    fn copy_test_failure(&mut self) {
+        let text = self.tests_selected_id().and_then(|id| {
+            let t = self.tests.tree.tests.iter().find(|t| t.id == id)?;
+            let r = t.current_result()?;
+            r.detail.clone().or_else(|| r.message.clone())
+        });
+        match text {
+            Some(t) => {
+                self.set_clipboard(t);
+                self.info("Copied the failure message");
+            }
+            None => self.info("No failure message here"),
+        }
+    }
+
     pub(super) fn tests_click(&mut self, double: bool) {
         let doc = self.doc();
         let line = doc.rope.char_to_line(doc.selection.head);
@@ -1242,6 +1380,8 @@ impl Editor {
         } else if double {
             self.open_test();
         } else {
+            // A click inside a failure box keeps that test selected.
+            self.refresh_tests_page();
             self.preview_test();
         }
     }
@@ -1249,7 +1389,7 @@ impl Editor {
     /// The group a row folds: itself for groups, the innermost suite or file for a test.
     fn fold_target(&self, row: TestRow) -> Option<TestRow> {
         match row {
-            TestRow::Test(id) => {
+            TestRow::Test(id) | TestRow::Detail(id) => {
                 let t = self.tests.tree.tests.iter().find(|t| t.id == id)?;
                 Some(if t.found.suite.is_empty() {
                     TestRow::File(t.file.clone())
@@ -1372,6 +1512,7 @@ impl Editor {
     pub(super) fn tests_page_key(&mut self, c: char) {
         match c {
             'r' | 'R' => self.run_test_at_cursor(),
+            'c' | 'C' => self.copy_test_failure(),
             'a' | 'A' => self.run_tests(RunWhat::All),
             'f' | 'F' => self.run_tests(RunWhat::Failed),
             ' ' => self.toggle_test_fold(),
@@ -1382,12 +1523,75 @@ impl Editor {
     }
 }
 
+/// A failure message made easier to read: paths relative to the project, stack frames from
+/// dependencies and the runtime dropped.
+pub(super) fn tidy_failure(text: &str, root: Option<&Path>) -> String {
+    let prefix = root.map(|r| format!("{}{}", r.display(), std::path::MAIN_SEPARATOR));
+    text.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            let frame = t.starts_with("at ");
+            !(frame
+                && (t.contains("node_modules")
+                    || t.contains("node:internal")
+                    || t.contains("System.Runtime")))
+        })
+        .map(|l| match &prefix {
+            Some(p) => l.replace(p.as_str(), ""),
+            None => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Split `text` into lines of at most `width` chars, breaking at spaces where possible.
+pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        // Continuation lines keep the original indentation.
+        let indent = chars
+            .iter()
+            .take_while(|c| **c == ' ')
+            .count()
+            .min(width / 2);
+        let mut start = 0;
+        let mut first = true;
+        while start < chars.len() {
+            let avail = if first { width } else { width - indent };
+            let mut end = (start + avail).min(chars.len());
+            // Break at the last space, unless that leaves a very short line (a long path
+            // after `at` is better split mid-path than moved whole to the next line).
+            if end < chars.len()
+                && let Some(sp) = chars[start..end].iter().rposition(|c| *c == ' ')
+                && sp > avail / 2
+            {
+                end = start + sp + 1;
+            }
+            let piece: String = chars[start..end].iter().collect();
+            let piece = piece.trim_end().to_string();
+            out.push(if first {
+                piece
+            } else {
+                format!("{}{}", " ".repeat(indent), piece.trim_start())
+            });
+            first = false;
+            start = end;
+        }
+    }
+    out
+}
+
 pub fn status_glyph(s: Status) -> char {
     match s {
         Status::Passed => '✔',
         Status::Failed => '✖',
         Status::NotRun => '○',
-        Status::Running => '●',
+        Status::Running => super::linting::spinner(),
         Status::Skipped => '⊘',
         Status::NotRunnable => '◇',
     }
@@ -1444,6 +1648,7 @@ mod tests {
             status: Status::Passed,
             duration: None,
             message: None,
+            detail: None,
             hash: t.found.hash,
         });
         ed.open_path(&spec);
@@ -1618,6 +1823,7 @@ mod tests {
             status: Status::Failed,
             duration: None,
             message: Some("nope".into()),
+            detail: Some("nope\n  at b (a.spec.js:4)".into()),
             hash: b.found.hash,
         });
         cursor_to(&mut ed, "▾ ○ outer");
@@ -1757,6 +1963,130 @@ mod tests {
             lines[3].contains("(no runner)  0/1 passed  — no test runner"),
             "{lines:?}"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failure_box_follows_the_selection() {
+        let (mut ed, dir, spec) = project("detailbox");
+        fs::write(
+            &spec,
+            "describe('s', () => {\n  it('one', () => {});\n  it('two', () => {});\n});\n",
+        )
+        .unwrap();
+        ed.reparse_tests(&spec);
+        let one = ed
+            .tests
+            .tree
+            .tests
+            .iter_mut()
+            .find(|t| t.found.name == "one")
+            .unwrap();
+        one.result = Some(RunResult {
+            status: Status::Failed,
+            duration: None,
+            message: Some("expected 1 to be 2".into()),
+            detail: Some(format!(
+                "AssertionError: expected 1 to be 2\n    at {}/tests/a.spec.js:2:5\n    at x (node_modules/vitest/dist/index.js:1:1)",
+                dir.display()
+            )),
+            hash: one.found.hash,
+        });
+        ed.execute(Command::ShowTests);
+        let before = page_lines(&ed).len();
+        assert!(ed.tests_detail_lines().is_none());
+        cursor_to(&mut ed, "✖ one");
+        ed.refresh_tests_page();
+        let lines = page_lines(&ed);
+        let (a, b) = ed.tests_detail_lines().unwrap();
+        assert_eq!(b - a + 1, 2, "{lines:?}"); // message + project-relative frame, no node_modules
+        assert!(
+            lines[a]
+                .trim_start()
+                .starts_with("│ AssertionError: expected 1 to be 2")
+        );
+        assert!(
+            lines[b].ends_with("│     at tests/a.spec.js:2:5"),
+            "{:?}",
+            lines[b]
+        );
+        // Down skips the box to the next test; the box closes.
+        ed.execute(Command::Move(crate::commands::Motion::Down, false));
+        assert_eq!(
+            ed.tests_cursor_row(),
+            Some(TestRow::Test(ed.tests.tree.tests[1].id.clone()))
+        );
+        assert!(ed.tests_detail_lines().is_none());
+        assert_eq!(page_lines(&ed).len(), before);
+        // Up comes back to the failed test and the box opens again under it.
+        ed.execute(Command::Move(crate::commands::Motion::Up, false));
+        assert!(ed.tests_detail_lines().is_some());
+        assert!(matches!(ed.tests_cursor_row(), Some(TestRow::Test(_))));
+        // The tab title counts the failure.
+        let doc = ed.panes[1].doc().unwrap();
+        assert_eq!(
+            crate::editor::hover::tab_title(&ed, doc).text,
+            "✖ Tests (1)"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wrapping_keeps_words_and_indent() {
+        assert_eq!(wrap_text("alpha beta gamma", 11), ["alpha beta", "gamma"]);
+        assert_eq!(
+            wrap_text("    at /a/very/long/path/file.js:1:2", 16),
+            ["    at /a/very/l", "    ong/path/fil", "    e.js:1:2"]
+        );
+        assert_eq!(wrap_text("x\n\ny", 10), ["x", "", "y"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_workspace_lints_the_whole_project() {
+        use crate::lint::eslint::Scope;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("jmx-tx-autolint-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = fs::canonicalize(dir).unwrap();
+        fs::write(dir.join("eslint.config.js"), "export default [];").unwrap();
+        fs::write(dir.join("src/a.js"), "let x = 1;\n").unwrap();
+        // ESLint stand-in: one warning for src/a.js, for any run.
+        let report = format!(
+            r#"[{{"filePath":"{}","messages":[{{"ruleId":"no-unused-vars","severity":1,"message":"unused","line":1,"column":5}}]}}]"#,
+            dir.join("src/a.js").display()
+        );
+        let fake = dir.join("node_modules/.bin/eslint");
+        fs::write(
+            &fake,
+            format!("#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{report}'\nexit 1\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut ed = Editor::new(Config::default(), &[]);
+        let mut ws = Workspace::new("auto");
+        ws.folders.push(dir.clone());
+        ed.workspace = Some(ws);
+        ed.start_test_explorer();
+        assert!(
+            ed.lint_jobs
+                .iter()
+                .any(|j| j.scope == Scope::Root(dir.clone()) && j.quiet)
+        );
+        ed.wait_jobs(Duration::from_secs(10));
+        assert_eq!(ed.problems.counts(), (0, 1));
+        assert!(ed.message.is_none(), "{:?}", ed.message); // quiet: no status message
+        // A file changed outside the editor is linted from disk.
+        fs::write(dir.join("src/a.js"), "let y = 2;\n").unwrap();
+        ed.outside_change(&dir.join("src/a.js"), false);
+        assert!(
+            ed.lint_jobs
+                .iter()
+                .any(|j| j.scope == Scope::File(dir.join("src/a.js")))
+        );
+        ed.wait_jobs(Duration::from_secs(10));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

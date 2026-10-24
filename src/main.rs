@@ -45,7 +45,7 @@ Options:
 
 Headless script commands:
   key ctrl+shift+k | type TEXT | move X,Y | click X,Y | dclick X,Y
-  press X,Y | release X,Y | wheel DY [X,Y] | resize WxH | shot FILE.png
+  press X,Y | release X,Y | wheel DY [X,Y] | resize WxH | shot FILE.png | shotnow FILE.png
   state | wait | sleep MS | quit";
 
 struct Args {

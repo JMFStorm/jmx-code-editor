@@ -162,6 +162,7 @@ const OTHERS: &[Binding] = &[
     bind(false, YES, false, n(NK::F4), PrevProblem),
     // Tests
     bind(true, YES, false, c('t'), ShowTests),
+    bind(true, NO, false, c('i'), ShowHover),
     bind(false, NO, false, n(NK::F5), RunTestAtCursor),
     bind(false, YES, false, n(NK::F5), RunAllTests),
     bind(true, NO, false, n(NK::F5), RunFailedTests),

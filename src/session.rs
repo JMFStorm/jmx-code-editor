@@ -3,11 +3,15 @@
 
 use std::time::{Duration, Instant};
 
+/// How long the mouse rests on a problem or test mark before its popup opens.
+const HOVER_DELAY: Duration = Duration::from_millis(300);
+
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::CursorIcon;
 
 use crate::commands::Command;
 use crate::editor::Editor;
+use crate::editor::hover::{Hover, HoverAt, HoverTarget};
 use crate::keymap;
 use crate::render::{Renderer, frame};
 use crate::theme;
@@ -34,6 +38,11 @@ pub struct Session {
     dragging_divider: bool,
     /// Left button held on the Explorer's right edge.
     dragging_sidebar: bool,
+    /// Where the mouse came to rest over a problem / test mark, and since when (the popup
+    /// opens after a short rest).
+    hover_pending: Option<(HoverTarget, Instant, (f32, f32))>,
+    /// What the shown mouse popup is for.
+    hover_shown: Option<HoverTarget>,
     /// Dragging a view's scrollbar thumb: (view, grab offset from the thumb's top).
     dragging_scrollbar: Option<(usize, f32)>,
     last_click: Option<(Instant, (f32, f32))>,
@@ -58,6 +67,8 @@ impl Session {
             dragging_divider: false,
             dragging_sidebar: false,
             dragging_scrollbar: None,
+            hover_pending: None,
+            hover_shown: None,
             last_click: None,
             click_count: 0,
             scroll_accum: (0.0, 0.0),
@@ -162,6 +173,8 @@ impl Session {
     /// A key press: `key` as typed, `base` the same key without modifiers (layout-independent
     /// shortcuts are matched on it first).
     pub fn key(&mut self, key: &Key, base: &Key, text: Option<&str>) {
+        self.hover_pending = None;
+        self.hover_shown = None;
         let mut cmd =
             keymap::lookup(self.modifiers, base).or_else(|| keymap::lookup(self.modifiers, key));
         // Ctrl+S, S (Ctrl held): the second press formats and saves.
@@ -559,6 +572,7 @@ impl Session {
             self.drag_scrollbar(y);
             return true;
         }
+        redraw |= self.track_hover(x, y);
         // Hovering a scrollbar brightens its thumb.
         self.ui.scrollbar_hot = self.layout.as_ref().and_then(|l| {
             l.panes
@@ -581,6 +595,81 @@ impl Session {
             redraw = true;
         }
         redraw || self.ui != before
+    }
+
+    /// The text spot under the mouse, if it is in a view's gutter or text.
+    fn hover_target_at(&self, x: f32, y: f32) -> Option<HoverTarget> {
+        let layout = self.layout.as_ref()?;
+        if layout.picker.is_some() || layout.find.is_some() || self.ui.menu.is_some() {
+            return None;
+        }
+        let pl = layout.pane_at(x, y)?;
+        let in_gutter = pl.gutter.contains(x, y);
+        if !in_gutter && !pl.text.contains(x, y) {
+            return None;
+        }
+        let (row, _) = pl.cell_at(x, y);
+        // Clicks snap to the nearest cell edge; hovering means the cell under the mouse.
+        let col = ((x - pl.text.x) / pl.cell_w).floor() as isize;
+        let (line, chr) = self.editor.pos_in_pane(pl.pane, row, col)?;
+        Some(HoverTarget {
+            pane: pl.pane,
+            line,
+            col: (!in_gutter).then_some(chr),
+        })
+    }
+
+    /// The mouse moved: restart the rest timer when it is over a new spot; hide a popup it
+    /// left. Returns true if the frame needs redrawing.
+    fn track_hover(&mut self, x: f32, y: f32) -> bool {
+        let target = self.hover_target_at(x, y);
+        if target.is_some() && target == self.hover_shown {
+            return false;
+        }
+        let mut redraw = false;
+        if self.hover_shown.take().is_some() {
+            self.editor.hover = None;
+            redraw = true;
+        }
+        self.hover_pending = match target {
+            Some(t) if self.hover_pending.is_some_and(|(p, _, _)| p == t) => self.hover_pending,
+            Some(t) => Some((t, Instant::now(), (x, y))),
+            None => None,
+        };
+        redraw
+    }
+
+    /// When the mouse rest timer runs out.
+    pub fn hover_deadline(&self) -> Option<Instant> {
+        self.hover_pending.map(|(_, t, _)| t + HOVER_DELAY)
+    }
+
+    /// Open the popup once the mouse has rested long enough. Returns true if it opened.
+    pub fn tick(&mut self) -> bool {
+        let Some((target, since, (x, y))) = self.hover_pending else {
+            return false;
+        };
+        if since.elapsed() < HOVER_DELAY {
+            return false;
+        }
+        self.hover_pending = None;
+        let Some(lines) = self.editor.hover_lines(target) else {
+            return false;
+        };
+        let line_h = self.layout.as_ref().map_or(20.0, |l| l.line_h);
+        // Just below the line the mouse is on.
+        let pl_top = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.pane(target.pane))
+            .map_or(y, |pl| pl.text.y);
+        let row = ((y - pl_top) / line_h).floor();
+        self.editor.hover = Some(Hover {
+            at: HoverAt::Point(x, pl_top + (row + 1.0) * line_h),
+            lines,
+        });
+        self.hover_shown = Some(target);
+        true
     }
 
     /// Move the dragged scrollbar thumb so its grab point is at `y`.

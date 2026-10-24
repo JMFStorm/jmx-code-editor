@@ -12,9 +12,46 @@ use std::path::{Path, PathBuf};
 pub enum Severity {
     Error,
     Warning,
-    /// Hints and notes (compilers report these; ESLint does not).
-    #[allow(dead_code)]
+    /// Messages and suggestions (compilers and analyzers report these; ESLint does not).
     Info,
+}
+
+/// Which severities the Problems list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ProblemFilter {
+    pub errors: bool,
+    pub warnings: bool,
+    pub infos: bool,
+}
+
+impl Default for ProblemFilter {
+    fn default() -> Self {
+        Self {
+            errors: true,
+            warnings: true,
+            infos: true,
+        }
+    }
+}
+
+impl ProblemFilter {
+    pub fn allows(&self, s: Severity) -> bool {
+        match s {
+            Severity::Error => self.errors,
+            Severity::Warning => self.warnings,
+            Severity::Info => self.infos,
+        }
+    }
+
+    pub fn toggle(&mut self, s: Severity) {
+        let flag = match s {
+            Severity::Error => &mut self.errors,
+            Severity::Warning => &mut self.warnings,
+            Severity::Info => &mut self.infos,
+        };
+        *flag = !*flag;
+    }
 }
 
 /// Which tool reported a diagnostic.
@@ -99,6 +136,18 @@ impl Problems {
             Severity::Warning => (e, w + 1),
             Severity::Info => (e, w),
         })
+    }
+
+    /// (errors, warnings, messages) over all files.
+    pub fn counts3(&self) -> (usize, usize, usize) {
+        self.files
+            .values()
+            .flatten()
+            .fold((0, 0, 0), |(e, w, i), d| match d.severity {
+                Severity::Error => (e + 1, w, i),
+                Severity::Warning => (e, w + 1, i),
+                Severity::Info => (e, w, i + 1),
+            })
     }
 
     pub fn file_count(&self) -> usize {

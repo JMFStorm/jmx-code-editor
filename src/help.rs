@@ -51,8 +51,9 @@ removed and a single newline at the end. Formatting is one undo step.
 Linting and problems
 --------------------
 In projects with ESLint (an eslint.config.js and ESLint installed with
-npm i -D eslint), JavaScript, TypeScript and Vue files are linted when they
-are opened and every time they are saved.
+npm i -D eslint), the whole project is linted when the workspace opens, C#
+projects are built, and files are linted again when they are opened, saved
+or changed outside JMX.
   Ctrl+Shift+M     lint the whole workspace and show the Problems list
   F4 / Shift+F4    go to the next / previous problem
   Ctrl+S, S        also applies ESLint's automatic fixes (after Prettier)
@@ -61,9 +62,15 @@ next to the line numbers; the problem on the cursor line is shown in the
 status bar, and the counts at its right end open the Problems list. Marks
 stay where ESLint reported them until the file is linted again (on save).
 
-The Problems list opens in the panel. Moving through it with Up/Down shows
-each problem in the editor right away while the cursor stays in the list;
-Enter (or a double-click) opens it and moves the cursor there.
+The Problems list opens in the panel. Its second line filters by type:
+e errors, w warnings, m messages (Roslyn info / analyzer suggestions,
+reported when the project enables them); click a chip to toggle it. The
+tab shows the counts, e.g. Problems ✖ 1 ⚠ 66, and a spinner while
+ESLint or a build runs; running tests spin in the Tests tab and list.
+Each row shows the position, rule and source; the selected problem's whole
+message opens in a box under it (c copies it). Moving through it with
+Up/Down shows each problem in the editor right away while the cursor stays
+in the list; Enter (or a double-click) opens it and moves the cursor there.
 
 Tests
 -----
@@ -76,6 +83,11 @@ spec and test files (Vitest or Jest: describe / it / test), Storybook stories
   Ctrl+F5          run the failed tests again
 In the Tests list: Up/Down show a test in the editor, Enter opens it,
 r run, a run all, f run failed, Space folds a group, Esc stops a run.
+Selecting a failed test opens a box under it with the whole failure
+message (stack paths relative to the project); c copies it.
+Resting the mouse on a test mark or a problem underline (or Ctrl+I at the
+cursor) shows the failure or problem in a popup. The Tests and Problems
+tabs show an icon and a count, e.g. ✖ Tests (2).
 The list follows your edits as you type: a new test appears at once, and a
 test whose code you change goes back to not run (changing it back brings
 the result back). Changes made outside JMX (git checkout ...) are picked up

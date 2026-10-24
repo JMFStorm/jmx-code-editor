@@ -18,6 +18,15 @@ pub const PROBLEMS_TITLE: &str = "Problems";
 /// How often running lint jobs are polled.
 pub(super) const LINT_POLL: Duration = Duration::from_millis(16);
 
+/// The Problems page as text, with what each line points at.
+struct ProblemsPage {
+    text: String,
+    rows: Vec<Option<Target>>,
+    chips: [(usize, usize); 3],
+    /// Lines of the message box and the problem's severity.
+    detail: Option<(usize, usize, Severity)>,
+}
+
 /// A location a Problems row points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -55,9 +64,10 @@ impl Editor {
             .push(LintJob::file(bin, root, path, text, revision));
     }
 
-    /// Ctrl+Shift+M: lint every ESLint project in the workspace (or the current file's
-    /// project) and show the Problems page.
-    pub(super) fn lint_workspace(&mut self) {
+    /// Lint every ESLint project in the workspace (or the current file's project). `show`
+    /// (Ctrl+Shift+M) opens the Problems page and reports; automatic runs (workspace opened)
+    /// are quiet and only fill in the problems.
+    pub(super) fn lint_workspace(&mut self, show: bool) {
         let folders: Vec<PathBuf> = match &self.workspace {
             Some(ws) if !ws.folders.is_empty() => ws.folders.clone(),
             _ => vec![PathBuf::from(self.dir_hint())],
@@ -65,9 +75,13 @@ impl Editor {
         let mut roots: Vec<PathBuf> = folders.iter().flat_map(|f| eslint::roots_in(f)).collect();
         roots.sort();
         roots.dedup();
-        self.show_problems();
+        if show {
+            self.show_problems();
+        }
         if roots.is_empty() {
-            self.info("No ESLint config (eslint.config.js) found in the workspace");
+            if show {
+                self.info("No ESLint config (eslint.config.js) found in the workspace");
+            }
             return;
         }
         let mut started = 0;
@@ -77,11 +91,15 @@ impl Editor {
                     log::info!("eslint workspace run in {}", root.display());
                     self.lint_jobs
                         .retain(|j| j.scope != Scope::Root(root.clone()));
-                    self.lint_jobs.push(LintJob::root(bin, root));
+                    let job = LintJob::root(bin, root);
+                    self.lint_jobs.push(if show { job } else { job.quiet() });
                     started += 1;
                 }
                 None => log::info!("no eslint for {}", root.display()),
             }
+        }
+        if !show {
+            return;
         }
         if started == 0 {
             self.info("ESLint not found: run npm i -D eslint in the project");
@@ -89,6 +107,27 @@ impl Editor {
             self.info("Linting… (ESLint)");
             self.refresh_problems_page();
         }
+    }
+
+    /// Lint a file from disk (changed outside the editor and not open).
+    pub(super) fn lint_file_on_disk(&mut self, path: &Path) {
+        if !eslint::lintable(path) {
+            return;
+        }
+        let Some(root) = eslint::config_root(path) else {
+            return;
+        };
+        let Some(bin) = eslint::find_eslint(&root) else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        self.lint_jobs
+            .retain(|j| j.scope != Scope::File(path.clone()));
+        self.lint_jobs
+            .push(LintJob::file(bin, root, path, text, 0).quiet());
     }
 
     pub(super) fn linting(&self) -> bool {
@@ -124,7 +163,7 @@ impl Editor {
                 (Ok(report), Scope::Root(root)) => {
                     let (e, w) = count(report.files.values().flatten());
                     self.problems.set_under(Source::Eslint, root, report.files);
-                    if !self.linting() {
+                    if !self.linting() && !job.quiet {
                         self.info(format!(
                             "ESLint: {e} error{}, {w} warning{} ({:.1} s)",
                             plural(e),
@@ -133,7 +172,8 @@ impl Editor {
                         ));
                     }
                 }
-                (Err(e), Scope::Root(_)) => self.error(e),
+                (Err(e), Scope::Root(_)) if !job.quiet => self.error(e),
+                (Err(e), Scope::Root(_)) => log::warn!("eslint: {e}"),
                 (Err(e), Scope::File(_)) => log::warn!("eslint: {e}"),
             }
         }
@@ -153,9 +193,11 @@ impl Editor {
 
     /// Open (or switch to) the Problems page in the panel.
     pub(super) fn show_problems(&mut self) {
-        let (text, rows) = self.problems_text();
-        self.open_virtual(PROBLEMS_TITLE, &text);
-        self.problem_rows = rows;
+        let page = self.problems_text();
+        self.open_virtual(PROBLEMS_TITLE, &page.text);
+        self.problem_rows = page.rows;
+        self.problem_chips = page.chips;
+        self.problem_detail = page.detail;
         if let Some((p, i)) = self.problems_page() {
             self.panes[p].docs[i].syntax.set_lang(Lang::Problems);
         }
@@ -179,45 +221,87 @@ impl Editor {
         let doc = &self.panes[p].docs[i];
         let line = doc.rope.char_to_line(doc.selection.head);
         let keep = self.problem_rows.get(line).cloned().flatten();
-        let (text, rows) = self.problems_text();
+        let page = self.problems_text();
+        self.problem_chips = page.chips;
+        // Box lines come after their row, so the first match is the problem's own row.
         let new_line = keep
-            .and_then(|t| rows.iter().position(|r| r.as_ref() == Some(&t)))
+            .and_then(|t| page.rows.iter().position(|r| r.as_ref() == Some(&t)))
             .unwrap_or(line);
+        let changed = self.panes[p].docs[i].rope != page.text.as_str();
         let doc = &mut self.panes[p].docs[i];
-        doc.rope = Rope::from_str(&text);
-        doc.syntax.set_lang(Lang::Problems);
+        if changed {
+            doc.rope = Rope::from_str(&page.text);
+            doc.syntax.set_lang(Lang::Problems);
+        }
         let line = new_line.min(doc.rope.len_lines().saturating_sub(1));
         doc.selection = Selection::point(doc.rope.line_to_char(line));
-        self.problem_rows = rows;
+        self.problem_rows = page.rows;
+        self.problem_detail = page.detail;
     }
 
     /// Page text and, per line, the location it points at.
-    fn problems_text(&self) -> (String, Vec<Option<Target>>) {
-        let (e, w) = self.problems.counts();
+    fn problems_text(&self) -> ProblemsPage {
+        let selected = self.problems_page_selection();
+        let (e, w, i) = self.problems.counts3();
+        let f = self.problem_filter;
+        let busy = if self.linting() || self.tests_building() {
+            format!("   {} checking…", spinner())
+        } else {
+            String::new()
+        };
+        // Line 1: one chip per severity; `·` instead of the icon when it is hidden.
+        let mut show = String::from("Show:  ");
+        let mut chips = [(0, 0); 3];
+        for (k, (on, icon, label, n)) in [
+            (f.errors, '✖', "Errors", e),
+            (f.warnings, '⚠', "Warnings", w),
+            (f.infos, 'ℹ', "Messages", i),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let start = show.chars().count();
+            show.push_str(&format!("[{} {label} {n}]", if on { icon } else { '·' }));
+            chips[k] = (start, show.chars().count());
+            show.push_str("  ");
+        }
+        show.push_str(" e / w / m toggle · Enter open · F4 next");
         let mut lines: Vec<(String, Option<Target>)> = vec![
             (
                 format!(
-                    "Problems: {e} error{}, {w} warning{}{}",
+                    "Problems: {e} error{} · {w} warning{} · {i} message{}{busy}",
                     plural(e),
                     plural(w),
-                    if self.linting() {
-                        "   (linting…)"
-                    } else {
-                        ""
-                    }
+                    plural(i)
                 ),
                 None,
             ),
-            (
-                "ESLint · Ctrl+Shift+M lint again · Up/Down show · Enter open · F4 next".into(),
-                None,
-            ),
+            (show, None),
             (String::new(), None),
         ];
+        let width = self.panes[PANEL].cols;
+        let mut detail: Option<(usize, usize, Severity)> = None;
+        let visible: Vec<(&PathBuf, Vec<&Diagnostic>)> = self
+            .problems
+            .files()
+            .map(|(p, d)| {
+                (
+                    p,
+                    d.iter()
+                        .filter(|d| f.allows(d.severity))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .filter(|(_, d)| !d.is_empty())
+            .collect();
         if self.problems.is_empty() {
             lines.push(("No problems found.".into(), None));
+        } else if !(f.errors || f.warnings || f.infos) {
+            lines.push(("All problem types are hidden (e / w / m)".into(), None));
+        } else if visible.is_empty() {
+            lines.push(("No problems of the shown types.".into(), None));
         }
-        for (path, diags) in self.problems.files() {
+        for (path, diags) in visible {
             lines.push((
                 format!("{}  ({})", self.display_path(path), diags.len()),
                 None,
@@ -228,20 +312,45 @@ impl Editor {
                     Severity::Warning => '⚠',
                     Severity::Info => 'ℹ',
                 };
-                let code = d
-                    .code
-                    .as_ref()
-                    .map(|c| format!("  [{c}]"))
-                    .unwrap_or_default();
                 let target = Target {
                     path: path.clone(),
                     line: d.line,
                     col: d.col,
                 };
+                // Compact row: position, rule and source; the message goes in the box.
+                let what = match &d.code {
+                    Some(c) => c.clone(),
+                    None => {
+                        let first = d.message.lines().next().unwrap_or("");
+                        let max = width.saturating_sub(24).max(20);
+                        if first.chars().count() > max {
+                            format!("{}…", first.chars().take(max).collect::<String>())
+                        } else {
+                            first.to_string()
+                        }
+                    }
+                };
                 lines.push((
-                    format!("  {mark} {}:{}  {}{code}", d.line + 1, d.col + 1, d.message),
-                    Some(target),
+                    format!(
+                        "  {mark} {}:{}  {what}  · {}",
+                        d.line + 1,
+                        d.col + 1,
+                        d.source.name()
+                    ),
+                    Some(target.clone()),
                 ));
+                // The selected problem shows its whole message in a box underneath.
+                if selected.as_ref() == Some(&target) && detail.is_none() {
+                    let first = lines.len();
+                    let indent = 4;
+                    for l in super::testing::wrap_text(
+                        d.message.trim(),
+                        width.saturating_sub(indent + 3).max(20),
+                    ) {
+                        lines.push((format!("{}│ {l}", " ".repeat(indent)), Some(target.clone())));
+                    }
+                    detail = Some((first, lines.len() - 1, d.severity));
+                }
             }
         }
         let text = lines
@@ -249,7 +358,100 @@ impl Editor {
             .map(|(l, _)| l.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        (text, lines.into_iter().map(|(_, t)| t).collect())
+        ProblemsPage {
+            text,
+            rows: lines.into_iter().map(|(_, t)| t).collect(),
+            chips,
+            detail,
+        }
+    }
+
+    /// The problem the Problems page cursor is on (its row or its box).
+    fn problems_page_selection(&self) -> Option<Target> {
+        let (p, i) = self.problems_page()?;
+        let doc = &self.panes[p].docs[i];
+        let line = doc.rope.char_to_line(doc.selection.head);
+        self.problem_rows.get(line).cloned().flatten()
+    }
+
+    /// Up / Down on the Problems page: the previous / next problem, skipping its message box.
+    pub(super) fn problems_step(&mut self, delta: isize) {
+        let doc = self.doc();
+        let line = doc.rope.char_to_line(doc.selection.head) as isize;
+        let in_box = |k: usize| {
+            self.problem_detail
+                .is_some_and(|(a, b, _)| k >= a && k <= b)
+        };
+        let mut k = line;
+        loop {
+            k += delta;
+            if k < 0 || k as usize >= self.problem_rows.len() {
+                return;
+            }
+            let k = k as usize;
+            if self.problem_rows[k].is_some() && !in_box(k) {
+                break;
+            }
+        }
+        let doc = self.doc_mut();
+        doc.selection = Selection::point(doc.rope.line_to_char(k as usize));
+        self.refresh_problems_page();
+        self.preview_problem();
+    }
+
+    /// `c` on the Problems page: copy the selected problem's message.
+    fn copy_problem_message(&mut self) {
+        let msg = self.problems_page_selection().and_then(|t| {
+            self.problems
+                .for_file(&t.path)
+                .iter()
+                .find(|d| d.line == t.line && d.col == t.col)
+                .map(|d| d.message.clone())
+        });
+        match msg {
+            Some(m) => {
+                self.set_clipboard(m);
+                self.info("Copied the problem message");
+            }
+            None => self.info("No problem selected"),
+        }
+    }
+
+    /// e / w / m on the Problems page: show or hide that severity.
+    pub(super) fn problems_page_key(&mut self, c: char) {
+        if c.eq_ignore_ascii_case(&'c') {
+            self.copy_problem_message();
+            return;
+        }
+        let sev = match c.to_ascii_lowercase() {
+            'e' => Severity::Error,
+            'w' => Severity::Warning,
+            'm' | 'i' => Severity::Info,
+            _ => return,
+        };
+        self.problem_filter.toggle(sev);
+        self.refresh_problems_page();
+    }
+
+    /// A click on the filter line of the Problems page: toggle the chip under it.
+    pub(super) fn problems_chip_click(&mut self) -> bool {
+        let doc = self.doc();
+        let line = doc.rope.char_to_line(doc.selection.head);
+        if line != 1 {
+            return false;
+        }
+        let col = doc.selection.head - doc.rope.line_to_char(line);
+        let Some(k) = self
+            .problem_chips
+            .iter()
+            .position(|&(a, b)| col >= a && col < b)
+        else {
+            return false;
+        };
+        let sev = [Severity::Error, Severity::Warning, Severity::Info][k];
+        self.problem_filter.toggle(sev);
+        self.refresh_problems_page();
+        true
     }
 
     /// A path relative to the workspace folder that holds it, else the full path.
@@ -348,9 +550,11 @@ impl Editor {
 
     /// F4 / Shift+F4: the next or previous problem after the cursor, across files, wrapping.
     pub(super) fn step_problem(&mut self, forward: bool) {
+        let filter = self.problem_filter;
         let all: Vec<Target> = self
             .problems
             .all()
+            .filter(|(_, d)| filter.allows(d.severity))
             .map(|(p, d)| Target {
                 path: p.clone(),
                 line: d.line,
@@ -393,11 +597,14 @@ impl Editor {
         {
             let doc = &mut self.panes[p].docs[i];
             doc.selection = Selection::point(doc.rope.line_to_char(row));
+            // Open the message box on the new problem.
+            self.refresh_problems_page();
         }
         self.show_location(&target, !in_panel);
         let msg = self
             .problems
             .all()
+            .filter(|(_, d)| filter.allows(d.severity))
             .nth(index)
             .map(|(_, d)| d.message.clone())
             .unwrap_or_default();
@@ -415,6 +622,20 @@ impl Editor {
             .filter(|d| d.line == line)
             .min_by_key(|d| d.severity)
     }
+}
+
+/// Frame of the busy spinner (a braille dot circling, 10 frames a second).
+pub fn spinner() -> char {
+    const FRAMES: [char; 8] = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    FRAMES[(ms / 100 % 8) as usize]
+}
+
+/// Is `c` a spinner frame (braille pattern)?
+pub fn is_spinner(c: char) -> bool {
+    ('\u{2800}'..='\u{28FF}').contains(&c)
 }
 
 fn count<'a>(diags: impl Iterator<Item = &'a Diagnostic>) -> (usize, usize) {
@@ -481,30 +702,127 @@ mod tests {
         ed.execute(Command::ShowProblems);
         assert_eq!(ed.focus, PANEL);
         let text = ed.doc().rope.to_string();
-        assert!(text.starts_with("Problems: 1 error, 2 warnings"), "{text}");
-        assert!(text.contains("  ✖ 2:3  bad a1  [rule]"), "{text}");
-        // Cursor onto the first problem row: the editor shows a.js at line 1, focus stays.
-        let row = ed.problem_rows.iter().position(Option::is_some).unwrap();
-        for _ in 0..row {
-            ed.execute(Command::Move(Motion::Down, false));
-        }
+        assert!(
+            text.starts_with("Problems: 1 error · 2 warnings · 0 messages"),
+            "{text}"
+        );
+        // Compact rows: the message only shows in the box of the selected problem.
+        assert!(text.contains("  ✖ 2:3  rule  · ESLint"), "{text}");
+        assert!(
+            !text.contains("bad a1") && ed.problem_detail.is_none(),
+            "{text}"
+        );
+        // Down onto the first problem: the editor shows a.js at line 1, focus stays, and the
+        // message opens in a box under the row.
+        ed.execute(Command::Move(Motion::Down, false));
         assert_eq!(ed.focus, PANEL);
         let shown = ed.panes[EDITOR].doc().unwrap();
         assert_eq!(shown.canonical.as_deref(), Some(a.as_path()));
         assert_eq!(shown.rope.char_to_line(shown.selection.head), 1);
-        // Down twice more: b.js replaces the a.js preview tab.
+        let line = |ed: &Editor| ed.doc().rope.char_to_line(ed.doc().selection.head);
+        let row = line(&ed);
+        assert_eq!(ed.problem_detail, Some((row + 1, row + 1, Severity::Error)));
+        assert_eq!(ed.doc().rope.line(row + 1).to_string(), "    │ bad a1\n");
+        // Down skips the box to the next problem, and the box follows.
         ed.execute(Command::Move(Motion::Down, false));
-        ed.execute(Command::Move(Motion::Down, false)); // file header of b.js: no change
+        let row = line(&ed);
+        assert!(ed.doc().rope.line(row).to_string().contains("4:3"));
+        assert_eq!(
+            ed.problem_detail,
+            Some((row + 1, row + 1, Severity::Warning))
+        );
+        assert!(!ed.doc().rope.to_string().contains("bad a1"));
+        // Down again skips b.js's header: b.js replaces the a.js preview tab.
         ed.execute(Command::Move(Motion::Down, false));
         let titles: Vec<String> = ed.panes[EDITOR].docs.iter().map(|d| d.title()).collect();
         assert!(
             titles.contains(&"b.js".to_string()) && !titles.contains(&"a.js".to_string()),
             "{titles:?}"
         );
-        // Enter opens it for real and moves the cursor to the editor.
+        // `c` copies the message (internal clipboard only: tests run in parallel).
+        ed.clipboard = None;
+        ed.insert_text("c");
+        assert_eq!(ed.internal_clip, "warn b0");
+        // Enter on a box line opens the problem for real and moves the cursor to the editor.
+        let (first, _, _) = ed.problem_detail.unwrap();
+        let doc = ed.doc_mut();
+        doc.selection = Selection::point(doc.rope.line_to_char(first));
         ed.execute(Command::Newline);
         assert_eq!(ed.focus, EDITOR);
         assert_eq!(ed.doc().canonical.as_deref(), Some(b.as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn long_messages_wrap_and_codeless_rows_show_the_message() {
+        let (mut ed, dir, a, _) = setup("wrap");
+        let mut long = diag(1, Severity::Error, &"word ".repeat(60));
+        long.code = None;
+        ed.problems.set_file(Source::Eslint, &a, vec![long]);
+        ed.execute(Command::ShowProblems);
+        let text = ed.doc().rope.to_string();
+        let row = text.lines().find(|l| l.contains("2:3")).unwrap();
+        assert!(
+            row.contains("word word") && row.contains('…') && row.ends_with("· ESLint"),
+            "{row}"
+        );
+        // F4 from the editor lands on it and opens the box, wrapped to the panel.
+        ed.execute(Command::FocusLeft);
+        ed.execute(Command::NextProblem);
+        let (first, last, _) = ed.problem_detail.unwrap();
+        assert!(last > first, "message should wrap over several lines");
+        let page = &ed.panes[PANEL].doc().unwrap().rope;
+        for k in first..=last {
+            let l = page.line(k).to_string();
+            assert!(
+                l.starts_with("    │ ")
+                    && l.trim_end().chars().count() <= ed.panes[PANEL].cols.max(26),
+                "{l}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn severity_filter_hides_rows_and_steers_f4() {
+        let (mut ed, dir, a, b) = setup("filter");
+        ed.execute(Command::ShowProblems);
+        let rows = |ed: &Editor| ed.problem_rows.iter().filter(|r| r.is_some()).count();
+        assert_eq!(rows(&ed), 3);
+        // w hides the warnings: only a.js's error is left, and b.js is gone.
+        ed.insert_text("w");
+        assert_eq!(rows(&ed), 1);
+        let text = ed.doc().rope.to_string();
+        assert!(text.contains("[· Warnings 2]"), "{text}");
+        assert!(
+            text.contains("a.js  (1)") && !text.contains("b.js"),
+            "{text}"
+        );
+        // F4 only visits shown problems.
+        ed.execute(Command::FocusLeft);
+        ed.execute(Command::NextProblem);
+        ed.execute(Command::NextProblem);
+        assert_eq!(ed.doc().canonical.as_deref(), Some(a.as_path()));
+        assert!(ed.message.as_ref().unwrap().text.starts_with("Problem 1/1"));
+        // Clicking the Errors chip hides errors too.
+        ed.execute(Command::ShowProblems);
+        let (s0, _) = ed.problem_chips[0];
+        let pos = ed.doc().rope.line_to_char(1) + s0 + 1;
+        ed.click(pos, false, 1);
+        assert!(!ed.problem_filter.errors);
+        let page = |ed: &Editor| ed.doc().rope.to_string();
+        assert!(
+            page(&ed).contains("No problems of the shown types"),
+            "{}",
+            page(&ed)
+        );
+        ed.insert_text("m"); // messages off too: everything is hidden
+        assert!(
+            page(&ed).contains("All problem types are hidden"),
+            "{}",
+            page(&ed)
+        );
+        let _ = b;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

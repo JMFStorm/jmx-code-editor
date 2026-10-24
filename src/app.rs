@@ -99,6 +99,9 @@ impl App {
             let t = m.at + MESSAGE_TIMEOUT;
             next = Some(next.map_or(t, |n| n.min(t)));
         }
+        if let Some(t) = self.session.hover_deadline() {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
         // Background search: debounce timer and result polling.
         if let Some(t) = self.session.editor.next_deadline() {
             next = Some(next.map_or(t, |n| n.min(t)));
@@ -143,6 +146,7 @@ impl ApplicationHandler for App {
         if let StartCause::ResumeTimeReached { .. } = cause {
             self.session.editor.expire_message();
             self.session.editor.poll_jobs();
+            self.session.tick();
             self.request_redraw();
         }
     }

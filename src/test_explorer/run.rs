@@ -24,6 +24,10 @@ pub struct Outcome {
     pub status: Status,
     pub duration: Option<Duration>,
     pub message: Option<String>,
+    /// The whole failure text (assertion, diff, stack), capped.
+    pub detail: Option<String>,
+    /// Data-row label (`accepts a@b.fi`, `Parses(n: 2)`), shown when a test has several rows.
+    pub row: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,8 +255,7 @@ fn run_dotnet(req: &Request, cancel: &AtomicBool) -> Report {
         report.error = Some(if has_errors {
             "Build failed: see Problems".into()
         } else {
-            process::first_error_line("dotnet test", &out.stderr)
-                .unwrap_or_else(|| format!("dotnet test produced no results (exit {:?})", out.code))
+            roslyn::dotnet_failure(&format!("{}\n{}", out.stdout, out.stderr), out.code)
         });
         return report;
     }
@@ -310,9 +313,12 @@ pub fn parse_jest_json(json: &str, root: &Path) -> Result<Vec<Outcome>, String> 
                 status: Status::Failed,
                 duration: None,
                 message: first_line(&f.message),
+                detail: full_text(&f.message),
+                row: None,
             });
         }
         for t in f.assertion_results {
+            let row = Some(t.title.clone());
             let mut path = t.ancestor_titles;
             path.push(t.title);
             out.push(Outcome {
@@ -329,10 +335,42 @@ pub fn parse_jest_json(json: &str, root: &Path) -> Result<Vec<Outcome>, String> 
                     .duration
                     .map(|ms| Duration::from_secs_f64(ms.max(0.0) / 1000.0)),
                 message: t.failure_messages.first().and_then(|m| first_line(m)),
+                detail: t.failure_messages.first().and_then(|m| full_text(m)),
+                row,
             });
         }
     }
     Ok(out)
+}
+
+/// Longest failure text kept for display.
+const DETAIL_LINES: usize = 60;
+const DETAIL_CHARS: usize = 6000;
+
+/// A failure message for display: ANSI colors stripped, trailing blanks removed, capped.
+fn full_text(msg: &str) -> Option<String> {
+    let clean = strip_ansi(msg);
+    let mut lines: Vec<&str> = clean.lines().map(str::trim_end).collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    while lines.first().is_some_and(|l| l.is_empty()) {
+        lines.remove(0);
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i == DETAIL_LINES || out.len() + l.len() > DETAIL_CHARS {
+            out.push('…');
+            return Some(out);
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    out.pop();
+    Some(out)
 }
 
 /// First meaningful line of a failure message, without ANSI colors.
@@ -374,11 +412,13 @@ pub fn parse_trx(xml: &str) -> Result<Vec<Outcome>, String> {
         outcome: String,
         duration: Option<Duration>,
         message: Option<String>,
+        stack: Option<String>,
     }
     let mut results: Vec<Pending> = Vec::new();
     let mut current_def: Option<String> = None;
     let mut in_result = false;
     let mut in_message = false;
+    let mut in_stack = false;
     let attr = |e: &quick_xml::events::BytesStart, key: &str| -> Option<String> {
         e.attributes()
             .flatten()
@@ -415,26 +455,54 @@ pub fn parse_trx(xml: &str) -> Result<Vec<Outcome>, String> {
                             outcome: attr(&e, "outcome").unwrap_or_default(),
                             duration: attr(&e, "duration").and_then(|d| parse_duration(&d)),
                             message: None,
+                            stack: None,
                         });
                         in_result = has_children;
                     }
                     "Message" if in_result => in_message = true,
+                    "StackTrace" if in_result => in_stack = true,
                     _ => {}
                 }
             }
-            Ok(Event::Text(t)) if in_message => {
+            Ok(Event::Text(t)) if in_message || in_stack => {
                 let raw = t.into_inner();
                 let text = quick_xml::escape::unescape(&raw)
                     .map(|c| c.into_owned())
                     .unwrap_or_else(|_| raw.into_owned());
-                if let Some(r) = results.last_mut()
-                    && r.message.is_none()
-                {
-                    r.message = first_line(&text);
+                if let Some(r) = results.last_mut() {
+                    let slot = if in_message {
+                        &mut r.message
+                    } else {
+                        &mut r.stack
+                    };
+                    slot.get_or_insert_with(String::new).push_str(&text);
+                }
+            }
+            // `&#xA;`, `&amp;` ... arrive as their own events.
+            Ok(Event::GeneralRef(r)) if in_message || in_stack => {
+                let c = match r.resolve_char_ref() {
+                    Ok(Some(c)) => Some(c),
+                    _ => match r.into_inner().as_ref() {
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
+                        _ => None,
+                    },
+                };
+                if let (Some(c), Some(res)) = (c, results.last_mut()) {
+                    let slot = if in_message {
+                        &mut res.message
+                    } else {
+                        &mut res.stack
+                    };
+                    slot.get_or_insert_with(String::new).push(c);
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
                 "Message" => in_message = false,
+                "StackTrace" => in_stack = false,
                 "UnitTestResult" => in_result = false,
                 "UnitTest" => current_def = None,
                 _ => {}
@@ -451,6 +519,25 @@ pub fn parse_trx(xml: &str) -> Result<Vec<Outcome>, String> {
                 .get(&r.test_id)
                 .cloned()
                 .unwrap_or_else(|| strip_params(&r.test_name).to_string());
+            // The message, then the first lines of the stack trace.
+            let detail = r.message.as_deref().map(|m| {
+                let mut text = m.trim_end().to_string();
+                if let Some(stack) = &r.stack {
+                    let lines: Vec<&str> = stack
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    for l in lines.iter().take(8) {
+                        text.push_str("\n  ");
+                        text.push_str(l);
+                    }
+                    if lines.len() > 8 {
+                        text.push_str("\n  …");
+                    }
+                }
+                text
+            });
             Outcome {
                 key: Key::Dotnet(full),
                 status: match r.outcome.as_str() {
@@ -459,7 +546,9 @@ pub fn parse_trx(xml: &str) -> Result<Vec<Outcome>, String> {
                     _ => Status::Skipped,
                 },
                 duration: r.duration,
-                message: r.message,
+                message: r.message.as_deref().and_then(first_line),
+                detail: detail.as_deref().and_then(full_text),
+                row: r.test_name.contains('(').then(|| r.test_name.clone()),
             }
         })
         .collect())
@@ -558,8 +647,18 @@ fn title_matches(pattern: &str, title: &str) -> bool {
     rest.is_empty()
 }
 
-/// Combine matched outcomes into one result.
-pub fn combine(matched: &[&Outcome]) -> Option<(Status, Option<Duration>, Option<String>)> {
+/// Matched outcomes combined into one result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Combined {
+    pub status: Status,
+    pub duration: Option<Duration>,
+    pub message: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Combine matched outcomes into one result. With several data rows, the detail lists each
+/// failing row under its own heading.
+pub fn combine(matched: &[&Outcome]) -> Option<Combined> {
     if matched.is_empty() {
         return None;
     }
@@ -576,7 +675,33 @@ pub fn combine(matched: &[&Outcome]) -> Option<(Status, Option<Duration>, Option
         .filter_map(|o| o.duration)
         .reduce(|a, b| a + b);
     let message = failed.and_then(|o| o.message.clone());
-    Some((status, duration, message))
+    let failing: Vec<&&Outcome> = matched
+        .iter()
+        .filter(|o| o.status == Status::Failed)
+        .collect();
+    let detail = if matched.len() > 1 && !failing.is_empty() {
+        let parts: Vec<String> = failing
+            .iter()
+            .map(|o| {
+                let head = o.row.clone().unwrap_or_else(|| "row".into());
+                let body = o
+                    .detail
+                    .clone()
+                    .or_else(|| o.message.clone())
+                    .unwrap_or_default();
+                format!("── {head} ──\n{body}")
+            })
+            .collect();
+        full_text(&parts.join("\n"))
+    } else {
+        failed.and_then(|o| o.detail.clone().or_else(|| o.message.clone()))
+    };
+    Some(Combined {
+        status,
+        duration,
+        message,
+        detail,
+    })
 }
 
 /// A regex for `-t` matching a test or suite by its full name (suite names + title, joined by
@@ -650,16 +775,23 @@ mod tests {
         let t = case("/w/tests/a.spec.js", &["isEmail"], "accepts %s", None);
         let m = match_outcome(&t, &o);
         assert_eq!(m.len(), 2);
-        let (status, duration, message) = combine(&m).unwrap();
-        assert_eq!(status, Status::Failed);
-        assert_eq!(duration, Some(Duration::from_secs_f64(0.0035)));
+        let c = combine(&m).unwrap();
+        assert_eq!(c.status, Status::Failed);
+        assert_eq!(c.duration, Some(Duration::from_secs_f64(0.0035)));
         assert_eq!(
-            message.unwrap(),
+            c.message.unwrap(),
             "AssertionError: expected false to be true"
         );
+        // Two rows, one failed: the detail names the failing row and keeps the stack.
+        let d = c.detail.unwrap();
+        assert!(
+            d.starts_with("── accepts c@d.fi ──\nAssertionError: expected false to be true"),
+            "{d}"
+        );
+        assert!(d.contains("at x"), "{d}");
         let top = case("/w/tests/a.spec.js", &[], "top", None);
         assert_eq!(
-            combine(&match_outcome(&top, &o)).unwrap().0,
+            combine(&match_outcome(&top, &o)).unwrap().status,
             Status::Skipped
         );
         assert!(parse_jest_json("nope", Path::new("/")).is_err());
@@ -673,7 +805,7 @@ mod tests {
     <UnitTestResult testId="1" testName="Inventory.Tests.ProductServiceTests.GetAll" outcome="Passed" duration="00:00:00.0120000" />
     <UnitTestResult testId="2" testName="Inventory.Tests.ProductServiceTests.Parses(n: 1)" outcome="Passed" duration="00:00:00.0010000" />
     <UnitTestResult testId="3" testName="Inventory.Tests.ProductServiceTests.Parses(n: 2)" outcome="Failed" duration="00:00:00.0010000">
-      <Output><ErrorInfo><Message>Assert.True() Failure&#xA;Expected: True</Message></ErrorInfo></Output>
+      <Output><ErrorInfo><Message>Assert.True() Failure&#xA;Expected: True</Message><StackTrace>   at Inventory.Tests.ProductServiceTests.Parses(Int32 n) in /w/T.cs:line 9</StackTrace></ErrorInfo></Output>
     </UnitTestResult>
   </Results>
   <TestDefinitions>
@@ -689,18 +821,24 @@ mod tests {
             "Parses",
             Some("Inventory.Tests.ProductServiceTests.Parses"),
         );
-        let (status, _, message) = combine(&match_outcome(&t, &o)).unwrap();
-        assert_eq!(status, Status::Failed);
-        assert_eq!(message.unwrap(), "Assert.True() Failure");
+        let c = combine(&match_outcome(&t, &o)).unwrap();
+        assert_eq!(c.status, Status::Failed);
+        assert_eq!(c.message.unwrap(), "Assert.True() Failure");
+        let d = c.detail.unwrap();
+        assert!(d.starts_with("── Inventory.Tests.ProductServiceTests.Parses(n: 2) ──\nAssert.True() Failure\nExpected: True"), "{d}");
+        assert!(
+            d.contains("  at Inventory.Tests.ProductServiceTests.Parses"),
+            "{d}"
+        );
         let g = case(
             "/x.cs",
             &[],
             "GetAll",
             Some("Inventory.Tests.ProductServiceTests.GetAll"),
         );
-        let (status, duration, _) = combine(&match_outcome(&g, &o)).unwrap();
+        let c = combine(&match_outcome(&g, &o)).unwrap();
         assert_eq!(
-            (status, duration),
+            (c.status, c.duration),
             (Status::Passed, Some(Duration::from_millis(12)))
         );
     }

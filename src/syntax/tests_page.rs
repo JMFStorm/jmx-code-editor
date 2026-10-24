@@ -18,13 +18,15 @@ pub fn lex(lx: &mut Lexer) {
             .eq(s.chars())
     };
     match chars.get(first) {
-        Some(&g @ ('✔' | '✖' | '○' | '●' | '⊘' | '◇')) => {
+        Some(&g)
+            if matches!(g, '✔' | '✖' | '○' | '●' | '⊘' | '◇') || crate::editor::is_spinner(g) =>
+        {
             let token = match g {
                 '✔' => Token::Pass,
                 '✖' => Token::Error,
-                '●' => Token::Running,
                 '⊘' => Token::Warning,
-                _ => Token::Comment,
+                '○' | '◇' => Token::Comment,
+                _ => Token::Running,
             };
             lx.push(first, first + 1, token);
             // Details after the name: `   — message`, `   3 ms`, `   running…`.
@@ -55,8 +57,8 @@ pub fn lex(lx: &mut Lexer) {
             let glyph = match chars.get(g) {
                 Some('✔') => Some(Token::Pass),
                 Some('✖') => Some(Token::Error),
-                Some('●') => Some(Token::Running),
                 Some('○') => Some(Token::Comment),
+                Some(&c) if c == '●' || crate::editor::is_spinner(c) => Some(Token::Running),
                 _ => None,
             };
             if let Some(t) = glyph {
@@ -67,6 +69,33 @@ pub fn lex(lx: &mut Lexer) {
                 (first..end.saturating_sub(3)).find(|&k| chars[k..k + 3] == [' ', ' ', '—'])
             {
                 lx.push(k, end, Token::Error);
+            }
+        }
+        // A line of the failure box: `│ text`.
+        Some('│') => {
+            lx.push(first, first + 1, Token::Error);
+            let text: String = chars[first + 1..].iter().collect();
+            let t = text.trim_start();
+            let s = end - t.chars().count();
+            let token = if t.starts_with("at ") || t.starts_with("❯ ") || t.starts_with("…") {
+                Some(Token::Comment)
+            } else if t.starts_with("──") {
+                Some(Token::Keyword)
+            } else if t.starts_with("Expected")
+                || t.starts_with("+ ")
+                || t.starts_with("- Expected")
+            {
+                Some(Token::Pass)
+            } else if t.starts_with("Received")
+                || t.starts_with("Actual")
+                || t.starts_with("+ Received")
+            {
+                Some(Token::Error)
+            } else {
+                None
+            };
+            if let Some(tok) = token {
+                lx.push(s, end, tok);
             }
         }
         _ if starts("Tests:") => lx.push(0, end, Token::Keyword),

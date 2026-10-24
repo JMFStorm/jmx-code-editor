@@ -97,6 +97,8 @@ pub struct RunResult {
     pub duration: Option<Duration>,
     /// First line of the failure message.
     pub message: Option<String>,
+    /// The whole failure text (assertion, diff, stack), for the detail box and hover.
+    pub detail: Option<String>,
     pub hash: u64,
 }
 
@@ -409,6 +411,7 @@ mod tests {
             status: Status::Passed,
             duration: None,
             message: None,
+            detail: None,
             hash: tc.found.hash,
         });
     }

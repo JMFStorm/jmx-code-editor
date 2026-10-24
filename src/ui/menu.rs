@@ -145,14 +145,33 @@ pub fn menu_entries(menu: MenuId, ed: &Editor) -> Vec<MenuEntry> {
                 .split
                 .then(|| ed.panes[1].doc().and_then(|d| d.virtual_name.clone()))
                 .flatten();
+            // Counts as on the tabs.
+            let (e, w, i) = ed.problems.counts3();
+            let mut parts = Vec::new();
+            for (n, g) in [(e, '✖'), (w, '⚠'), (i, 'ℹ')] {
+                if n > 0 {
+                    parts.push(format!("{g}{n}"));
+                }
+            }
+            let problems_label = if parts.is_empty() {
+                "Problems".into()
+            } else {
+                format!("Problems ({})", parts.join(" "))
+            };
+            let failed = ed.tests.tree.counts().1;
+            let tests_label = if failed > 0 {
+                format!("Tests ({failed} failed)")
+            } else {
+                "Tests".into()
+            };
             let page = |label: &str, title: &str, cmd: Command| {
                 MenuEntry::toggle(label, cmd, true, shown.as_deref() == Some(title))
             };
             vec![
                 page("Help", crate::help::HELP_TITLE, Help),
                 page("Shortcuts", crate::help::SHORTCUTS_TITLE, ShowShortcuts),
-                page("Problems", crate::editor::PROBLEMS_TITLE, ShowProblems),
-                page("Tests", crate::editor::TESTS_TITLE, ShowTests),
+                page(&problems_label, crate::editor::PROBLEMS_TITLE, ShowProblems),
+                page(&tests_label, crate::editor::TESTS_TITLE, ShowTests),
                 MenuEntry::separator(),
                 MenuEntry::toggle("Show Panel", ToggleSplit, true, ed.split),
                 MenuEntry::item(

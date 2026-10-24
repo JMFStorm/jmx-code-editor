@@ -100,6 +100,8 @@ pub enum Command {
     PrevProblem,
     /// Show the Tests page in the panel.
     ShowTests,
+    /// Popup with the problem or test failure at the cursor.
+    ShowHover,
     /// Run the test or suite at the cursor (or the selected Tests row).
     RunTestAtCursor,
     RunAllTests,
@@ -253,6 +255,7 @@ impl Command {
             NextProblem => "Next problem (error / warning)",
             PrevProblem => "Previous problem",
             ShowTests => "Show the Tests list",
+            ShowHover => "Show the problem / test failure at the cursor",
             RunTestAtCursor => "Run the test at the cursor",
             RunAllTests => "Run all tests",
             RunFailedTests => "Run failed tests",
@@ -318,7 +321,7 @@ impl Command {
             NextTab | PrevTab | GotoTab(_) => Group::Tabs,
             Find | FindNext | FindPrev | GotoLine | FindInFiles | NextResult | PrevResult
             | ToggleCase | ToggleWholeWord | ToggleRegex | LintWorkspace | ShowProblems
-            | NextProblem | PrevProblem => Group::Search,
+            | NextProblem | PrevProblem | ShowHover => Group::Search,
             ShowTests | RunTestAtCursor | RunAllTests | RunFailedTests | RefreshTests => {
                 Group::Tests
             }

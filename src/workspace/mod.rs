@@ -83,6 +83,8 @@ pub struct SessionState {
     pub explorer: ExplorerState,
     pub panes: Vec<PaneState>,
     pub search: SearchState,
+    /// Severities shown in the Problems list.
+    pub problem_filter: crate::lint::ProblemFilter,
 }
 
 /// Last Find in Files query, file filter and search options.
@@ -104,6 +106,7 @@ impl Default for SessionState {
             explorer: ExplorerState::default(),
             panes: Vec::new(),
             search: SearchState::default(),
+            problem_filter: crate::lint::ProblemFilter::default(),
         }
     }
 }
@@ -307,6 +310,7 @@ impl Editor {
                 include: self.find.include.clone(),
                 options: self.search_opts,
             },
+            problem_filter: self.problem_filter,
         }
     }
 
@@ -439,6 +443,7 @@ impl Editor {
         self.find.query = state.search.query.clone();
         self.find.include = state.search.include.clone();
         self.search_opts = state.search.options;
+        self.problem_filter = state.problem_filter;
         self.refresh_problems_page();
         self.refresh_tests_page();
         missing
@@ -571,6 +576,11 @@ mod tests {
                 .starts_with("Tests: 0 passed")
         );
         assert_eq!(ed2.panes[1].active, 2);
+        // The Problems filter is saved too.
+        let mut st = state.clone();
+        st.problem_filter.warnings = false;
+        ed2.restore(&st, &dir);
+        assert!(!ed2.problem_filter.warnings && ed2.problem_filter.errors);
 
         // Duplicate pages from older files collapse to one each.
         let dup: SessionState = serde_json::from_str(

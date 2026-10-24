@@ -54,6 +54,8 @@ pub enum ScriptCmd {
     Wheel(f32, Option<(f32, f32)>),
     Resize(u32, u32),
     Shot(PathBuf),
+    /// Screenshot without waiting for background work (to see progress indicators).
+    ShotNow(PathBuf),
     State,
     /// Wait for background work (Find in Files) to finish.
     Wait,
@@ -125,6 +127,7 @@ pub fn run(editor: Editor, opts: HeadlessOptions) -> i32 {
 }
 
 fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Result<()> {
+    let wait_first = matches!(cmd, ScriptCmd::Shot(_));
     match cmd {
         ScriptCmd::Key(mods, key, text) => {
             session.modifiers = mods;
@@ -174,8 +177,12 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
             let scale = session.layout.as_ref().map_or(1.0, |l| l.scale);
             session.set_size(w, h, scale);
         }
-        ScriptCmd::Shot(path) => {
-            session.editor.wait_jobs(JOB_TIMEOUT);
+        ScriptCmd::Shot(path) | ScriptCmd::ShotNow(path) => {
+            if wait_first {
+                session.editor.wait_jobs(JOB_TIMEOUT);
+            } else {
+                session.editor.poll_jobs();
+            }
             if !session.draw(renderer, true) {
                 bail!("frame was not rendered");
             }
@@ -191,6 +198,7 @@ fn execute(session: &mut Session, renderer: &mut Renderer, cmd: ScriptCmd) -> Re
         ScriptCmd::Sleep(ms) => {
             std::thread::sleep(Duration::from_millis(ms));
             session.editor.expire_message();
+            session.tick();
         }
         ScriptCmd::Quit => session.editor.execute(crate::commands::Command::Quit),
     }
@@ -286,6 +294,10 @@ pub fn parse_line(line: &str) -> Result<Option<ScriptCmd>> {
         "shot" => {
             need("an output path")?;
             ScriptCmd::Shot(PathBuf::from(arg))
+        }
+        "shotnow" => {
+            need("an output path")?;
+            ScriptCmd::ShotNow(PathBuf::from(arg))
         }
         "state" => ScriptCmd::State,
         "wait" => ScriptCmd::Wait,
@@ -405,8 +417,9 @@ pub fn state_json(session: &Session) -> String {
             .iter()
             .map(|d| {
                 format!(
-                    "{{\"title\":{},\"dirty\":{}}}",
+                    "{{\"title\":{},\"label\":{},\"dirty\":{}}}",
                     json_str(&d.title()),
+                    json_str(&crate::editor::hover::tab_title(ed, d).text),
                     d.is_dirty()
                 )
             })
@@ -522,6 +535,15 @@ pub fn state_json(session: &Session) -> String {
         "{{\"total\":{},\"passed\":{passed},\"failed\":{failed},\"not_run\":{not_run},\"running\":{running}}}",
         ed.tests.tree.tests.len()
     );
+    let hover = opt(ed.hover.as_ref().map(|h| {
+        json_str(
+            &h.lines
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }));
     let menu = session.open_menu_id().map(|m| json_str(&format!("{m:?}")));
     let prompt = ed.minibuffer.as_ref().map(|m| json_str(&m.input));
     let message = ed.message.as_ref().map(|m| json_str(&m.text));
@@ -530,7 +552,7 @@ pub fn state_json(session: &Session) -> String {
 \"active\":{},\"tabs\":[{}],\"panes\":[{}],\"path\":{},\"dirty\":{},\"read_only\":{},\
 \"line\":{},\"col\":{},\"selection\":{},\"cursors\":{},\"lang\":{},\"line_text\":{},\"lines\":{},\"indent\":{},\
 \"line_ending\":{},\"picker\":{},\"prompt\":{},\"message\":{},\"font_size\":{},\
-\"workspace\":{},\"explorer\":{explorer},\"find\":{find},\"formatting\":{},\"problems\":{problems},\"tests\":{tests}}}",
+\"workspace\":{},\"explorer\":{explorer},\"find\":{find},\"formatting\":{},\"problems\":{problems},\"tests\":{tests},\"hover\":{hover}}}",
         json_str(frame::mode_label(ed)),
         ed.focus,
         ed.split,

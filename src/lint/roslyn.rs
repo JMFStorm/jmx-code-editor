@@ -35,6 +35,8 @@ fn parse_line(line: &str, root: &Path) -> Option<(PathBuf, Diagnostic)> {
     let (sev_at, severity) = [
         (": error ", Severity::Error),
         (": warning ", Severity::Warning),
+        (": info ", Severity::Info),
+        (": message ", Severity::Info),
     ]
     .into_iter()
     .filter_map(|(pat, sev)| line.find(pat).map(|i| (i, pat.len(), sev)))
@@ -85,6 +87,44 @@ fn parse_line(line: &str, root: &Path) -> Option<(PathBuf, Diagnostic)> {
             code: Some(code.to_string()),
         },
     ))
+}
+
+/// A readable reason why a `dotnet` command did nothing useful, from its output: a missing
+/// or mismatched SDK (global.json), a missing project, or the first `error` line.
+pub fn dotnet_failure(output: &str, code: Option<i32>) -> String {
+    let lines: Vec<&str> = output.lines().map(str::trim).collect();
+    if lines
+        .iter()
+        .any(|l| l.contains("compatible .NET SDK was not found"))
+    {
+        let requested = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("Requested SDK version:"))
+            .map(str::trim);
+        return match requested {
+            Some(v) => format!(
+                "no compatible .NET SDK: global.json asks for {v} (dotnet --list-sdks shows what is installed)"
+            ),
+            None => "no compatible .NET SDK installed".into(),
+        };
+    }
+    if let Some(l) = lines
+        .iter()
+        .find(|l| l.contains("MSB1009") || l.contains("Project file does not exist"))
+    {
+        return l.to_string();
+    }
+    lines
+        .iter()
+        .find(|l| l.contains(": error ") || l.starts_with("error"))
+        .or_else(|| {
+            // Skip headers such as "... possibly because:" and bullet lines.
+            lines
+                .iter()
+                .find(|l| !l.is_empty() && !l.ends_with(':') && !l.starts_with('*'))
+        })
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| format!("dotnet failed (exit {code:?})"))
 }
 
 /// The C# project file for `path`: the nearest `.csproj` in its folder or above.
@@ -148,8 +188,15 @@ impl BuildJob {
                 ];
                 let started = Instant::now();
                 let result = process::run_with_timeout(&dotnet, &args, &dir, "", BUILD_TIMEOUT)
-                    .map(|out| {
-                        parse_build_output(&format!("{}\n{}", out.stdout, out.stderr), &dir)
+                    .and_then(|out| {
+                        let all = format!("{}\n{}", out.stdout, out.stderr);
+                        let files = parse_build_output(&all, &dir);
+                        // A failed build with no compiler diagnostics: say why.
+                        if out.code != Some(0) && files.is_empty() {
+                            Err(dotnet_failure(&all, out.code))
+                        } else {
+                            Ok(files)
+                        }
                     });
                 log::info!(
                     "dotnet build {} in {:?}: {}",
@@ -185,6 +232,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explains_dotnet_failures() {
+        let sdk = "The command could not be loaded, possibly because:\n  * You intended to execute a .NET application:\n      The application 'test' does not exist.\n  * You intended to execute a .NET SDK command:\n      A compatible .NET SDK was not found.\n\nRequested SDK version: 8.0.400\nglobal.json file: /w/global.json\n";
+        assert_eq!(
+            dotnet_failure(sdk, Some(145)),
+            "no compatible .NET SDK: global.json asks for 8.0.400 (dotnet --list-sdks shows what is installed)"
+        );
+        assert_eq!(
+            dotnet_failure(
+                "MSBUILD : error MSB1009: Project file does not exist.\n",
+                Some(1)
+            ),
+            "MSBUILD : error MSB1009: Project file does not exist."
+        );
+        assert_eq!(dotnet_failure("", Some(3)), "dotnet failed (exit Some(3))");
+    }
+
+    #[test]
     fn parses_msbuild_lines() {
         let out = "\
   Determining projects to restore...
@@ -193,6 +257,7 @@ mod tests {
 Models/Product.cs(9,30,9,34): error CS1002: ; expected [/w/src/Api/Api.csproj]
 /w/src/Api/Api.csproj : error NU1101: Unable to find package Foo. No packages exist with this id in source(s): nuget.org
 CSC : error CS5001: Program does not contain a static 'Main' method suitable for an entry point
+/w/src/Api/Program.cs(1,1): info IDE0005: Using directive is unnecessary. [/w/src/Api/Api.csproj]
 Build FAILED.
 ";
         let files = parse_build_output(out, Path::new("/w/src/Api"));
@@ -212,6 +277,11 @@ Build FAILED.
         assert_eq!(model[0].severity, Severity::Error);
         let proj = &files[Path::new("/w/src/Api/Api.csproj")];
         assert_eq!(proj[0].code.as_deref(), Some("NU1101"));
-        assert_eq!(files.len(), 3); // the CSC line has no file
+        let program = &files[Path::new("/w/src/Api/Program.cs")];
+        assert_eq!(
+            (program[0].severity, program[0].code.as_deref()),
+            (Severity::Info, Some("IDE0005"))
+        );
+        assert_eq!(files.len(), 4); // the CSC line has no file
     }
 }

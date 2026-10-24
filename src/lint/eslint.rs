@@ -204,6 +204,8 @@ pub struct LintJob {
     /// For file jobs: the document revision that was linted.
     pub revision: u64,
     pub started: Instant,
+    /// Automatic run: no message when it finishes.
+    pub quiet: bool,
 }
 
 impl LintJob {
@@ -255,7 +257,14 @@ impl LintJob {
             scope,
             revision,
             started: Instant::now(),
+            quiet: false,
         }
+    }
+
+    /// The same job, finishing without a status message.
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
+        self
     }
 
     pub fn try_result(&self) -> Option<Result<Report, String>> {

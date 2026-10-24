@@ -2,9 +2,10 @@ pub mod document;
 mod find_files;
 mod formatting;
 pub mod history;
+pub mod hover;
 mod linting;
 mod testing;
-pub use linting::PROBLEMS_TITLE;
+pub use linting::{PROBLEMS_TITLE, is_spinner, spinner};
 pub use testing::{TESTS_TITLE, status_glyph};
 pub mod movement;
 mod multi;
@@ -113,12 +114,20 @@ pub struct Editor {
     pub lint_jobs: Vec<crate::lint::eslint::LintJob>,
     /// What each line of the Problems page points at.
     pub problem_rows: Vec<Option<linting::Target>>,
+    /// Severities the Problems list shows.
+    pub problem_filter: crate::lint::ProblemFilter,
+    /// Columns of the Errors / Warnings / Messages chips on the Problems page (line 1).
+    pub problem_chips: [(usize, usize); 3],
+    /// Page lines of the message box under the selected problem, and its severity.
+    pub problem_detail: Option<(usize, usize, crate::lint::Severity)>,
     /// File opened only to preview a problem; the next preview replaces it.
     preview_doc: Option<PathBuf>,
     /// Test explorer, builds and file watching.
     pub tests: testing::TestState,
     /// The editor file last revealed in the Explorer.
     revealed: Option<PathBuf>,
+    /// Popup with a test failure or problems (mouse rest, Ctrl+I).
+    pub hover: Option<hover::Hover>,
     /// Where the last workspace is remembered; `None` in headless runs and tests.
     pub state_file: Option<PathBuf>,
     clipboard: Option<arboard::Clipboard>,
@@ -154,9 +163,13 @@ impl Editor {
             problems: crate::lint::Problems::default(),
             lint_jobs: Vec::new(),
             problem_rows: Vec::new(),
+            problem_filter: crate::lint::ProblemFilter::default(),
+            problem_chips: [(0, 0); 3],
+            problem_detail: None,
             preview_doc: None,
             tests: testing::TestState::default(),
             revealed: None,
+            hover: None,
             clipboard,
             internal_clip: String::new(),
             line_clip: None,
@@ -269,6 +282,7 @@ impl Editor {
 
     /// Typed text (already filtered of shortcuts by the app).
     pub fn insert_text(&mut self, text: &str) {
+        self.hover = None;
         if self.find.open {
             self.find_panel_type(text);
             return;
@@ -291,6 +305,12 @@ impl Editor {
         if self.on_tests_page() {
             if let Some(c) = text.chars().next() {
                 self.tests_page_key(c);
+            }
+            return;
+        }
+        if self.on_problems_page() {
+            if let Some(c) = text.chars().next() {
+                self.problems_page_key(c);
             }
             return;
         }
@@ -322,6 +342,12 @@ impl Editor {
 
     pub fn execute(&mut self, cmd: Command) {
         log::trace!("command {cmd:?}");
+        // Any key closes a popup (Ctrl+I opens one).
+        self.hover = None;
+        if cmd == Command::ShowHover {
+            self.show_hover_at_cursor();
+            return;
+        }
         if self.find.open && self.find_command(cmd) {
             return;
         }
@@ -355,6 +381,16 @@ impl Editor {
             match cmd {
                 Move(Motion::Left, false) => return self.tests_left(),
                 Move(Motion::Right, false) => return self.tests_right(),
+                Move(Motion::Up, false) => return self.tests_step(-1),
+                Move(Motion::Down, false) => return self.tests_step(1),
+                _ => {}
+            }
+        }
+        // Up / Down on the Problems page step between problems, past the message box.
+        if self.on_problems_page() {
+            match cmd {
+                Move(Motion::Up, false) => return self.problems_step(-1),
+                Move(Motion::Down, false) => return self.problems_step(1),
                 _ => {}
             }
         }
@@ -482,7 +518,7 @@ impl Editor {
             PrevResult => self.step_result(false),
             ToggleCase | ToggleWholeWord | ToggleRegex => self.toggle_search_option(cmd),
             LintWorkspace => {
-                self.lint_workspace();
+                self.lint_workspace(true);
                 self.build_workspace();
             }
             ShowTests => self.show_tests(),
@@ -519,6 +555,8 @@ impl Editor {
             }
             ResetSplit => self.split_ratio = 0.5,
             // Menus belong to the session (UI state); nothing to do here.
+            // Handled before the match.
+            ShowHover => {}
             FileMenu | WorkspaceMenu | SelectionMenu | PanelMenu => {}
             ClosePanelTab => {
                 let index = self.panes[PANEL].active;
@@ -605,6 +643,13 @@ impl Editor {
         }
         if step && self.on_tests_page() {
             self.preview_test();
+        }
+        // Paging may land on a failure box: keep the box with the selected test.
+        if matches!(cmd, Move(..)) && self.on_tests_page() {
+            self.refresh_tests_page();
+        }
+        if matches!(cmd, Move(..)) && self.on_problems_page() {
+            self.refresh_problems_page();
         }
         self.track_test_edits();
     }
@@ -825,6 +870,20 @@ impl Editor {
 
     /// Char position for a cell relative to the text area (row may be negative / past the end
     /// while drag-selecting; it is clamped).
+    /// Text position under a cell of any view (the one under the mouse need not have focus).
+    pub fn pos_in_pane(&self, pane: usize, row: isize, col: isize) -> Option<(usize, usize)> {
+        let doc = self.panes[pane].doc()?;
+        let last = doc.rope.len_lines() as isize - 1;
+        let line = doc.view.top_line as isize + row;
+        if line < 0 || line > last {
+            return None;
+        }
+        let line = line as usize;
+        let col = (doc.view.left_col as isize + col).max(0) as usize;
+        let pos = mv::pos_at_col(&doc.rope, line, col, self.config.tab_width);
+        Some((line, pos - doc.rope.line_to_char(line)))
+    }
+
     pub fn pos_at_cell(&self, row: isize, col: isize) -> usize {
         let doc = self.doc();
         let last = doc.rope.len_lines() as isize - 1;
@@ -857,9 +916,13 @@ impl Editor {
         doc.history.break_coalescing();
         self.ensure_cursor_visible();
         if self.on_problems_page() {
-            if count >= 2 {
+            if self.problems_chip_click() {
+                // Toggled a severity filter.
+            } else if count >= 2 {
                 self.open_problem();
             } else {
+                // Move the message box to the clicked problem.
+                self.refresh_problems_page();
                 self.preview_problem();
             }
         }

@@ -527,7 +527,7 @@ fn eslint_problems_page_and_navigation() {
         "state\n\
          key ctrl+shift+m\n\
          state\n\
-         key down\nkey down\nkey down\nkey down\n\
+         key down\n\
          state\n\
          shot {}\n\
          key enter\n\
@@ -572,9 +572,13 @@ fn eslint_problems_page_and_navigation() {
     );
     assert!(s[1].contains("\"focus\":1"), "{}", s[1]);
     assert!(s[1].contains("\"title\":\"Problems\""), "{}", s[1]);
-    // Down to the first problem row: focus stays in the panel.
+    // Down to the first problem row (its message in a box below): focus stays in the panel.
     assert!(s[2].contains("\"focus\":1"), "{}", s[2]);
-    assert!(s[2].contains("x is never used"), "{}", s[2]);
+    assert!(
+        s[2].contains("\"line_text\":\"  ⚠ 2:5  no-unused-vars  · ESLint\""),
+        "{}",
+        s[2]
+    );
     // Enter: the editor at a.js line 2.
     assert!(s[3].contains("\"focus\":0"), "{}", s[3]);
     assert!(s[3].contains("\"line\":2,\"col\":5"), "{}", s[3]);

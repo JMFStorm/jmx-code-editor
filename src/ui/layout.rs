@@ -75,6 +75,9 @@ pub struct PaneLayout {
     pub line_h: f32,
 }
 
+/// Width of the gutter's marks column (test glyphs, problem bars), in cells.
+pub const MARKS_COLS: f32 = 2.0;
+
 /// Each view keeps at least this many text columns when the divider is dragged.
 const MIN_PANE_COLS: f32 = 20.0;
 /// Extra grab width on each side of the divider line, in pixels (before scaling).
@@ -244,10 +247,12 @@ impl PaneLayout {
         let tab_bar = Rect::new(area.x, area.y, area.w, bar_h);
         let lines = ed.panes[pane].doc().map_or(1, |d| d.rope.len_lines());
         let gutter_digits = lines.to_string().len().max(3);
+        // [marks column][line number][gap]; the marks column holds test glyphs and problem
+        // bars, so they never overlap the numbers.
         let gutter_w = if ed.config.line_numbers {
-            ((gutter_digits + 2) as f32 * cell_w).round()
+            ((MARKS_COLS + gutter_digits as f32 + 1.0) * cell_w).round()
         } else {
-            0.0
+            (MARKS_COLS * cell_w).round()
         };
         let body_y = tab_bar.bottom();
         let body_h = (area.bottom() - body_y).max(0.0);
@@ -322,7 +327,7 @@ pub fn tab_rects(ed: &Editor, pl: &PaneLayout, scale: f32) -> Vec<TabRect> {
         .enumerate()
         .map(|(i, d)| {
             // Layout: two spaces, title, space, modified dot, two spaces.
-            let title = d.title();
+            let title = crate::editor::hover::tab_title(ed, d).text;
             let w = (title.width() + 6) as f32 * pl.cell_w;
             let r = Rect::new(x, pl.tab_bar.y, w, pl.tab_bar.h);
             x += w + scale.max(1.0);
@@ -654,5 +659,25 @@ mod tests {
         }
         assert_eq!(pl.top_for_thumb_y(-50.0, lines), 0);
         assert_eq!(pl.top_for_thumb_y(10_000.0, lines), lines - 1);
+    }
+
+    #[test]
+    fn gutter_marks_do_not_overlap_numbers() {
+        for lines in [10usize, 1500, 25_000] {
+            let mut ed = Editor::new(Config::default(), &[]);
+            ed.doc_mut().rope = ropey::Rope::from_str(&"x\n".repeat(lines));
+            let l = Layout::compute(&ed, 1000.0, 600.0, 10.0, 20.0, 1.0);
+            let pl = &l.panes[0];
+            let digits = pl.gutter_digits as f32;
+            // The glyph (about 1.2 cells wide) ends before the numbers start.
+            let glyph_end = pl.gutter.x + (MARKS_COLS * 10.0 - 10.0) / 2.0 + 1.5 + 12.0;
+            let number_start = pl.gutter.x + MARKS_COLS * 10.0;
+            assert!(
+                glyph_end <= number_start + 0.01,
+                "{lines}: {glyph_end} > {number_start}"
+            );
+            // The numbers end before the text.
+            assert!(number_start + digits * 10.0 <= pl.text.x);
+        }
     }
 }

@@ -15,8 +15,8 @@ use crate::test_explorer::Status as TestStatus;
 use crate::theme::{Rgba, Theme};
 use crate::ui::find_panel::{Field, Row};
 use crate::ui::layout::{
-    CHIP_LABELS, FindLayout, Layout, PaneLayout, PickerLayout, Rect, SidebarLayout, chip_rects,
-    tab_rects, toolbar_buttons,
+    CHIP_LABELS, FindLayout, Layout, MARKS_COLS, PaneLayout, PickerLayout, Rect, SidebarLayout,
+    chip_rects, tab_rects, toolbar_buttons,
 };
 use crate::ui::menu::{MenuId, menu_layout};
 use crate::ui::minibuffer::PromptKind;
@@ -216,6 +216,9 @@ pub fn build(
     }
     if let Some(fl) = &layout.find {
         draw_find_panel(&mut b, ed, layout, fl, cursor_on);
+    }
+    if let Some(h) = &ed.hover {
+        draw_hover(&mut b, ed, layout, h);
     }
     if let Some(menu) = ui.menu {
         draw_menu(&mut b, ed, layout, ui, menu);
@@ -543,6 +546,80 @@ fn draw_picker(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PickerLayout, curs
     }
 }
 
+/// Popup with a test failure or problems, below its anchor (above it when there is no room),
+/// kept inside the window. Long lines wrap.
+fn draw_hover(b: &mut Builder, ed: &Editor, l: &Layout, h: &crate::editor::hover::Hover) {
+    use crate::editor::hover::{HoverAt, HoverKind};
+    let theme = b.theme;
+    // The anchor: the mouse, or the cursor's cell.
+    let (ax, ay, line_top) = match h.at {
+        HoverAt::Point(x, y) => (x, y, y - l.line_h),
+        HoverAt::Cell { pane, line, col } => {
+            let Some(pl) = l.pane(pane) else {
+                return;
+            };
+            let Some(doc) = ed.panes[pane].doc() else {
+                return;
+            };
+            let row = line as f32 - doc.view.top_line as f32;
+            let pos = doc.rope.line_to_char(line.min(doc.rope.len_lines() - 1)) + col;
+            let c = mv::col_of(
+                &doc.rope,
+                pos.min(doc.rope.len_chars()),
+                ed.config.tab_width,
+            ) as f32
+                - doc.view.left_col as f32;
+            let y = pl.text.y + row * l.line_h;
+            (pl.text.x + c * l.cell_w, y + l.line_h, y)
+        }
+    };
+    let max_cols = ((l.width / l.cell_w) as usize)
+        .saturating_sub(4)
+        .clamp(20, 90);
+    // Wrap.
+    let mut rows: Vec<(String, HoverKind)> = Vec::new();
+    for (text, kind) in &h.lines {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            rows.push((String::new(), *kind));
+            continue;
+        }
+        for chunk in chars.chunks(max_cols) {
+            rows.push((chunk.iter().collect(), *kind));
+        }
+    }
+    let cols = rows
+        .iter()
+        .map(|(t, _)| t.width())
+        .max()
+        .unwrap_or(1)
+        .max(10);
+    let pad = l.cell_w;
+    let w = cols as f32 * l.cell_w + 2.0 * pad;
+    let h_px = rows.len() as f32 * l.line_h + l.line_h * 0.6;
+    let below = ay + h_px <= l.status.y;
+    let y = if below {
+        ay + 2.0
+    } else {
+        (line_top - h_px - 2.0).max(l.toolbar.bottom())
+    };
+    let x = ax.min(l.width - w - pad).max(pad);
+    let panel = Rect::new(x, y, w, h_px);
+    draw_overlay_frame(b, l, panel);
+    let mut ty = y + l.line_h * 0.3;
+    for (text, kind) in rows {
+        let color = match kind {
+            HoverKind::Error => theme.error,
+            HoverKind::Warning => theme.warning,
+            HoverKind::Pass => theme.token(Token::Pass),
+            HoverKind::Text => theme.fg,
+            HoverKind::Dim => theme.fg_dim,
+        };
+        b.label(text, x + pad, ty, color, panel);
+        ty += l.line_h;
+    }
+}
+
 /// Shadow, border and body of an overlay panel.
 fn draw_overlay_frame(b: &mut Builder, l: &Layout, panel: Rect) {
     let theme = b.theme;
@@ -864,6 +941,58 @@ fn draw_text_area(
 
     b.rect(pl.gutter, theme.gutter_bg);
 
+    // The failure box under the selected test on the Tests page, and the message box under
+    // the selected problem on the Problems page (its left bar in the severity color).
+    let detail_box = match doc.syntax.lang {
+        crate::syntax::Lang::Tests => ed.tests_detail_lines().map(|(a, b)| (a, b, None)),
+        crate::syntax::Lang::Problems => ed.problem_detail.map(|(a, b, sev)| {
+            let token = match sev {
+                crate::lint::Severity::Error => crate::syntax::Token::Error,
+                crate::lint::Severity::Warning => crate::syntax::Token::Warning,
+                crate::lint::Severity::Info => crate::syntax::Token::Function,
+            };
+            (a, b, Some(theme.token(token)))
+        }),
+        _ => None,
+    };
+    if let Some((first, last, accent)) = detail_box
+        && last >= top
+        && first <= top + pl.rows
+    {
+        let indent = rope
+            .line(first)
+            .chars()
+            .take_while(|c| *c == ' ')
+            .count()
+            .saturating_sub(left);
+        let x = pl.text.x + indent as f32 * l.cell_w - l.cell_w * 0.4;
+        let y0 = pl.text.y + first.saturating_sub(top) as f32 * l.line_h;
+        let y1 = pl.text.y + (last + 1).saturating_sub(top).min(pl.rows + 1) as f32 * l.line_h;
+        let w = (pl.text.right() - x - l.cell_w).max(0.0);
+        let border = l.scale.max(1.0).round();
+        b.rect(
+            Rect::new(
+                x - border,
+                y0 - border,
+                w + 2.0 * border,
+                y1 - y0 + 2.0 * border,
+            ),
+            theme.overlay_border,
+        );
+        b.rect(Rect::new(x, y0, w, y1 - y0), theme.overlay_bg);
+        if let Some(accent) = accent {
+            b.rect(
+                Rect::new(
+                    x - border,
+                    y0 - border,
+                    3.0 * border,
+                    y1 - y0 + 2.0 * border,
+                ),
+                accent,
+            );
+        }
+    }
+
     for row in 0..=pl.rows {
         let line = top + row;
         if line >= rope.len_lines() {
@@ -968,7 +1097,7 @@ fn draw_text_area(
             }
         }
 
-        // Test status glyph at the right edge of the gutter.
+        // Test status glyph, centered in the gutter's marks column.
         if let Some((_, status)) = test_marks.iter().find(|(l, _)| *l == line) {
             let color = match status {
                 TestStatus::Passed => theme.token(Token::Pass),
@@ -978,7 +1107,8 @@ fn draw_text_area(
                 TestStatus::NotRun | TestStatus::NotRunnable => theme.fg_dim,
             };
             let glyph = crate::editor::status_glyph(*status).to_string();
-            b.label(glyph, pl.gutter.right() - l.cell_w * 1.1, y, color, body);
+            let x = pl.gutter.x + (MARKS_COLS * l.cell_w - l.cell_w) / 2.0 + l.cell_w * 0.15;
+            b.label(glyph, x, y, color, body);
         }
 
         if ed.config.line_numbers {
@@ -988,7 +1118,7 @@ fn draw_text_area(
             } else {
                 theme.gutter_fg
             };
-            b.label(num, pl.gutter.x + l.cell_w, y, color, body);
+            b.label(num, pl.gutter.x + MARKS_COLS * l.cell_w, y, color, body);
         }
 
         let spans = doc.syntax.line_spans(rope, line).unwrap_or_default();
@@ -1049,7 +1179,25 @@ fn draw_tab_bar(b: &mut Builder, ed: &Editor, l: &Layout, pl: &PaneLayout, focus
         } else {
             theme.tab_fg
         };
-        b.label(format!("  {}", t.title), t.rect.x, text_y, color, bar);
+        // Problems / Tests tabs: a colored status icon in front of the title.
+        let doc = &ed.panes[pl.pane].docs[t.index];
+        let spans: Vec<(std::ops::Range<usize>, Rgba)> = crate::editor::hover::tab_title(ed, doc)
+            .spans
+            .into_iter()
+            .map(|(r, kind)| {
+                use crate::editor::hover::HoverKind;
+                let c = match kind {
+                    HoverKind::Error => theme.error,
+                    HoverKind::Warning => theme.warning,
+                    HoverKind::Pass => theme.token(Token::Pass),
+                    HoverKind::Text => theme.accent,
+                    HoverKind::Dim => theme.fg_dim,
+                };
+                (r.start + 2..r.end + 2, c)
+            })
+            .collect();
+        let text = format!("  {}", t.title);
+        b.colored_label(text, spans, t.rect.x, text_y, color, bar);
         if t.dirty {
             let x = t.rect.x + (t.title.width() + 3) as f32 * l.cell_w;
             b.label("●", x, text_y, theme.modified, bar);
@@ -1207,7 +1355,21 @@ fn draw_status_bar(b: &mut Builder, ed: &Editor, l: &Layout, tooltip: Option<Str
                     (format!("{code}: {}", d.message), color)
                 })
             })
-            .or_else(|| ed.cursor_test_failure().map(|m| (m, theme.error))),
+            .or_else(|| ed.cursor_test_failure().map(|m| (m, theme.error)))
+            // Otherwise: tests running.
+            .or_else(|| {
+                let running = ed.tests.tree.counts().3;
+                (running > 0).then(|| {
+                    (
+                        format!(
+                            "{} Running {running} test{}…",
+                            crate::editor::spinner(),
+                            if running == 1 { "" } else { "s" }
+                        ),
+                        theme.accent,
+                    )
+                })
+            }),
     };
     if let Some((text, color)) = shown {
         let mx = x + 2.0 * l.cell_w;

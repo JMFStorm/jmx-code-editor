@@ -134,6 +134,7 @@ impl Editor {
                 | WorkspaceMenu
                 | SelectionMenu
                 | PanelMenu
+                | ShowHover
                 | ClosePanelTab
                 | ToggleExplorer
                 | ToggleCase
