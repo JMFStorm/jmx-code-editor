@@ -91,6 +91,19 @@ pub fn run_cancellable(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Output, String> {
+    run_cancellable_env(program, args, cwd, stdin, timeout, cancel, &[])
+}
+
+/// Like `run_cancellable`, with extra environment variables.
+pub fn run_cancellable_env(
+    program: &Path,
+    args: &[&std::ffi::OsStr],
+    cwd: &Path,
+    stdin: &str,
+    timeout: Duration,
+    cancel: &AtomicBool,
+    env: &[(String, std::ffi::OsString)],
+) -> Result<Output, String> {
     let name = program.file_stem().map_or_else(
         || program.display().to_string(),
         |s| s.to_string_lossy().into_owned(),
@@ -99,7 +112,8 @@ pub fn run_cancellable(
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .envs(env.iter().map(|(k, v)| (k, v)));
     if cwd.is_dir() {
         cmd.current_dir(cwd);
     }

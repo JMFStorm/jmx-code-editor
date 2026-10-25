@@ -500,6 +500,12 @@ impl Editor {
             || name.starts_with("vite.config.")
             || name.starts_with("jest.config.");
         let cs_project = name.ends_with(".csproj");
+        if name == crate::test_explorer::odin_config::FILE_NAME {
+            // Odin test flags: the next run uses them; old run errors may be fixed.
+            self.tests
+                .run_errors
+                .retain(|root, _| !root.starts_with(&dir));
+        }
         let ignore_file = name == ".gitignore" || name == ".ignore";
         if ignore_file {
             // What counts as a test (or project) may have changed below this folder.
@@ -883,7 +889,9 @@ impl Editor {
             let name = job.request.project.name.clone();
             match report.error {
                 Some(e) => {
-                    self.tests.batch.push((format!("{name}: {e}"), true));
+                    // The first line is the summary; the rest shows on the Tests page.
+                    let first = e.lines().next().unwrap_or_default();
+                    self.tests.batch.push((format!("{name}: {first}"), true));
                     self.tests.run_errors.insert(root, e);
                 }
                 None if failed > 0 => self
@@ -1139,6 +1147,8 @@ impl Editor {
         let tree = &self.tests.tree;
         let (passed, failed, not_run, running) = tree.counts();
         let mut lines: Vec<(String, Option<TestRow>)> = Vec::new();
+        // Lines of the boxes with a project's run error (the output that tells why).
+        let mut error_lines: std::collections::HashSet<usize> = Default::default();
         let mut head = format!("Tests: {passed} passed · {failed} failed · {not_run} not run");
         if running > 0 {
             head.push_str(&format!(
@@ -1198,10 +1208,9 @@ impl Editor {
                 .filter(|t| t.status() == Status::Passed)
                 .count();
             let runner = project.runner.map_or("no runner", Framework::name);
-            let problem = self
-                .tests
-                .run_errors
-                .get(&project.root)
+            let error = self.tests.run_errors.get(&project.root);
+            let problem = error
+                .and_then(|e| e.lines().next())
                 .map(|e| format!("  — {e}"))
                 .unwrap_or_default();
             lines.push((
@@ -1214,6 +1223,14 @@ impl Editor {
                 ),
                 Some(row.clone()),
             ));
+            // The rest of a run error (compiler / linker output) in a box under the row.
+            if let Some(rest) = error.and_then(|e| e.split_once('\n')).map(|(_, r)| r) {
+                let width = self.panel_width().saturating_sub(6).max(16);
+                for l in wrap_text(rest, width) {
+                    error_lines.insert(lines.len());
+                    lines.push((format!("  │ {l}"), Some(row.clone())));
+                }
+            }
             if self.tests.collapsed.contains(&row.key()) {
                 continue;
             }
@@ -1251,6 +1268,19 @@ impl Editor {
         let mut page: PageText<TestRow> = PageText::new(self.panel_width());
         let mut k = 0;
         while k < lines.len() {
+            if error_lines.contains(&k) {
+                let first = page.len();
+                while error_lines.contains(&k) {
+                    page.line(lines[k].0.clone(), lines[k].1.clone());
+                    k += 1;
+                }
+                page.boxes.push(PageBox {
+                    first,
+                    last: page.len() - 1,
+                    accent: Some(Token::Error),
+                });
+                continue;
+            }
             if matches!(lines[k].1, Some(TestRow::Detail(_))) {
                 let first = page.len();
                 while k < lines.len() && matches!(lines[k].1, Some(TestRow::Detail(_))) {

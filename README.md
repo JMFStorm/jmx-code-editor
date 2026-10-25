@@ -24,7 +24,7 @@ extension ecosystem to maintain.
 - Problems list: ESLint for the whole project and as you edit, Roslyn (`dotnet build`)
   errors and warnings, filters for errors / warnings / messages, F4 to step through them
 - Tests view (Ctrl+Shift+T): Vitest, Jest, `dotnet test` (xUnit, NUnit, MSTest) and
-  `odin test` (`@(test)` procs); tests are
+  `odin test` (`@(test)` procs; extra flags in a project's `jdc.json`, see Help); tests are
   found statically and stay in sync with your edits (a changed test goes back to "not run"),
   failures in a box under the selected test and on the gutter mark
 

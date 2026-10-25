@@ -77,7 +77,12 @@ Tests
 The Tests list (Ctrl+Shift+T, in the panel) shows the tests of the workspace:
 spec and test files (Vitest or Jest: describe / it / test), Storybook stories
 (*.stories.js/ts), C# test methods (xUnit, NUnit, MSTest) and Odin @(test)
-procedures (run with odin test, one package at a time).
+procedures (run with odin test, one package at a time). Odin projects can
+give odin test extra flags in a jdc.json at the project root, e.g. a
+library folder to link and load from:
+  {{ \"odin\": {{ \"test_args\": [\"-extra-linker-flags:-Llibs/linux\", \"-debug\"] }} }}
+With a jdc.json, tests run in its folder. When a run fails to build or
+start, the output that says why shows in a box under the project.
   F5               run the test (or describe block / test class) at the
                    cursor; in the Tests list: the selected test, file or project
   Shift+F5         run all tests

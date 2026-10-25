@@ -9,6 +9,7 @@
 pub mod discover_cs;
 pub mod discover_js;
 pub mod discover_odin;
+pub mod odin_config;
 pub mod run;
 pub mod watch;
 

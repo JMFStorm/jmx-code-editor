@@ -290,9 +290,21 @@ fn run_odin(req: &Request, cancel: &AtomicBool) -> Report {
     if let Some(f) = &req.filter {
         args.push(format!("-define:ODIN_TEST_NAMES={f}").into());
     }
+    let config = super::odin_config::load(&req.project.root);
+    args.extend(config.args.iter().map(OsString::from));
+    let env = super::odin_config::library_env(&config.lib_dirs);
     let refs: Vec<&std::ffi::OsStr> = args.iter().map(OsString::as_os_str).collect();
-    let out = process::run_cancellable(&bin, &refs, &req.project.root, "", RUN_TIMEOUT, cancel);
+    let out = process::run_cancellable_env(
+        &bin,
+        &refs,
+        config.cwd.as_deref().unwrap_or(&req.project.root),
+        "",
+        RUN_TIMEOUT,
+        cancel,
+        &env,
+    );
     let report_text = std::fs::read_to_string(&json).unwrap_or_default();
+    let built = exe.exists();
     let _ = std::fs::remove_file(&json);
     let _ = std::fs::remove_file(&exe);
     let out = match out {
@@ -306,13 +318,8 @@ fn run_odin(req: &Request, cancel: &AtomicBool) -> Report {
     };
     let log = format!("{}\n{}", out.stdout, out.stderr);
     if report_text.is_empty() {
-        let first = log
-            .lines()
-            .find(|l| l.contains("Error:"))
-            .or_else(|| log.lines().find(|l| !l.trim().is_empty()))
-            .unwrap_or("no output");
         return Report {
-            error: Some(format!("Build failed: {}", first.trim())),
+            error: Some(odin_failure(&log, built, out.code)),
             ..Default::default()
         };
     }
@@ -326,6 +333,72 @@ fn run_odin(req: &Request, cancel: &AtomicBool) -> Report {
             ..Default::default()
         },
     }
+}
+
+/// Lines of output shown for a failed run at most.
+const FAILURE_LINES: usize = 25;
+
+/// Why `odin test` produced no report: a summary line, then the output that tells why
+/// (the error lines and what follows them, else the last lines) and a hint for missing
+/// libraries.
+fn odin_failure(log: &str, built: bool, code: Option<i32>) -> String {
+    let lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut summary = if built {
+        format!(
+            "The test program failed to start{}",
+            code.map(|c| format!(" (exit {c})")).unwrap_or_default()
+        )
+    } else {
+        "Build failed".to_string()
+    };
+    let is_error = |l: &str| {
+        let low = l.to_lowercase();
+        // Linker lines (`ld: cannot find -lSDL3`) don't say "error".
+        ["error", "undefined", "cannot find", "not found"]
+            .iter()
+            .any(|w| low.contains(w))
+    };
+    let mut keep = vec![false; lines.len()];
+    for (k, l) in lines.iter().enumerate() {
+        if is_error(l) {
+            for x in keep.iter_mut().skip(k).take(3) {
+                *x = true;
+            }
+        }
+    }
+    let mut detail: Vec<&str> = if built || !keep.contains(&true) {
+        lines[lines.len().saturating_sub(FAILURE_LINES)..].to_vec()
+    } else {
+        lines
+            .iter()
+            .zip(&keep)
+            .filter(|(_, k)| **k)
+            .map(|(l, _)| *l)
+            .take(FAILURE_LINES)
+            .collect()
+    };
+    if detail.is_empty() {
+        detail.push("(no output)");
+    }
+    if let Some(first) = detail.first()
+        && !built
+    {
+        // The first error in the summary line too (the Tests row and status bar show it).
+        summary.push_str(&format!(": {}", first.trim()));
+    }
+    let mut out = summary;
+    for l in detail {
+        out.push('\n');
+        out.push_str(l.trim_end());
+    }
+    if log.contains("cannot find -l") || log.contains("error while loading shared libraries") {
+        out.push_str(&format!(
+            "\nHint: add the library folder to {} → odin.test_args, e.g. \
+             \"-extra-linker-flags:-Llibs/linux\"",
+            super::odin_config::FILE_NAME
+        ));
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -917,6 +990,39 @@ pub fn name_pattern(path: &[String], whole: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn odin_failures_say_why() {
+        let link = "/usr/bin/ld: cannot find -lSDL3: No such file or directory\n\
+                    clang: error: linker command failed with exit code 1\n";
+        let e = odin_failure(link, false, Some(1));
+        let lines: Vec<&str> = e.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Build failed: /usr/bin/ld: cannot find -lSDL3: No such file or directory"
+        );
+        assert!(lines.contains(&"clang: error: linker command failed with exit code 1"));
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .starts_with("Hint: add the library folder to jdc.json")
+        );
+
+        let start = "g.bin: error while loading shared libraries: libSDL3.so.0: cannot open\n";
+        let e = odin_failure(start, true, Some(127));
+        assert!(e.starts_with("The test program failed to start (exit 127)\ng.bin: error while"));
+        assert!(e.contains("Hint:"));
+
+        let compile = "a.odin(3:5) Error: Undeclared name: foo\n\tfoo()\n\t^\nother\n";
+        let e = odin_failure(compile, false, Some(1));
+        assert_eq!(
+            e,
+            "Build failed: a.odin(3:5) Error: Undeclared name: foo\n\
+             a.odin(3:5) Error: Undeclared name: foo\n\tfoo()\n\t^"
+        );
+        assert!(odin_failure("", false, None).ends_with("(no output)"));
+    }
 
     #[test]
     fn odin_report_with_failure_messages() {

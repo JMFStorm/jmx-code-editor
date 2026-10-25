@@ -184,7 +184,13 @@ impl Gpu {
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 Frame::Skip
             }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                // The texture must be released before the surface is configured again.
+                drop(frame);
+                surface.configure(&self.device, config);
+                Frame::Skip
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&self.device, config);
                 Frame::Skip
             }
