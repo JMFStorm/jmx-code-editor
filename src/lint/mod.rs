@@ -60,6 +60,8 @@ pub enum Source {
     Eslint,
     /// The C# compiler, via `dotnet build`.
     Roslyn,
+    /// A language server, by name.
+    Lsp(&'static str),
 }
 
 impl Source {
@@ -67,6 +69,7 @@ impl Source {
         match self {
             Source::Eslint => "ESLint",
             Source::Roslyn => "Roslyn",
+            Source::Lsp(name) => name,
         }
     }
 }

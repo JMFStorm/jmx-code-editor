@@ -866,3 +866,63 @@ fn panel_pages_survive_restart_and_panel_menu() {
     assert!(s[1].contains("\"lang\":\"Problems\""), "{}", s[1]);
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Odin: `@(test)` procs are found, `odin test` runs them, and no binary is left behind.
+/// Skipped when `odin` is not installed.
+#[test]
+fn odin_tests_are_found_and_run() {
+    let has_odin = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("odin").is_file() || d.join("odin.exe").is_file())
+    });
+    if !has_odin {
+        eprintln!("skipping: odin is not installed");
+        return;
+    }
+    let dir = temp_dir("odin");
+    let pkg = dir.join("proj/calc");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(
+        pkg.join("calc.odin"),
+        "package calc\n\nadd :: proc(a, b: int) -> int { return a + b }\n",
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("calc_test.odin"),
+        "package calc\n\nimport \"core:testing\"\n\n\
+         @(test)\nadds :: proc(t: ^testing.T) {\n\ttesting.expect_value(t, add(1, 2), 3)\n}\n\n\
+         @(test)\nbroken :: proc(t: ^testing.T) {\n\ttesting.expect_value(t, add(1, 1), 3)\n}\n",
+    )
+    .unwrap();
+    let ws = dir.join("p.jdcws");
+    fs::write(
+        &ws,
+        r#"{"version":1,"name":"p","folders":["proj"],"respect_gitignore":true}"#,
+    )
+    .unwrap();
+    let script = "wait\nstate\nkey shift+f5\nwait 120\nstate\nquit\n";
+    let Some(out) = run(&dir, script, &[&ws]) else {
+        return;
+    };
+    let s: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("\"panes\""))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        s[0].contains(r#""tests":{"total":2,"passed":0,"failed":0,"not_run":2"#),
+        "{}",
+        s[0]
+    );
+    assert!(
+        s[1].contains(r#""total":2,"passed":1,"failed":1"#),
+        "{}",
+        s[1]
+    );
+    let left: Vec<_> = fs::read_dir(&pkg)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+    fs::remove_dir_all(&dir).unwrap();
+}

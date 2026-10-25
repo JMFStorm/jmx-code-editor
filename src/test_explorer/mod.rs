@@ -1,5 +1,5 @@
 //! Test explorer model: tests found in the workspace (JS specs, Storybook stories, C# test
-//! methods), their projects, and their last results.
+//! methods, Odin `@(test)` procs), their projects, and their last results.
 //!
 //! A test's status is tied to the text that produced it: each test keeps a hash of its source
 //! (body), and a result only counts while the hash matches the one that ran. Editing a test
@@ -8,6 +8,7 @@
 
 pub mod discover_cs;
 pub mod discover_js;
+pub mod discover_odin;
 pub mod run;
 pub mod watch;
 
@@ -24,6 +25,8 @@ pub enum Framework {
     XUnit,
     NUnit,
     MSTest,
+    /// `odin test` on a package.
+    Odin,
 }
 
 impl Framework {
@@ -35,6 +38,7 @@ impl Framework {
             Framework::XUnit => "xUnit",
             Framework::NUnit => "NUnit",
             Framework::MSTest => "MSTest",
+            Framework::Odin => "odin test",
         }
     }
 
@@ -321,10 +325,33 @@ pub fn is_cs(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("cs"))
 }
 
+pub fn is_odin(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("odin"))
+}
+
+/// A file that may hold tests (by its name; C# files are checked against their project).
+pub fn may_have_tests(path: &Path) -> bool {
+    is_cs(path) || is_odin(path) || js_test_kind(path).is_some()
+}
+
 /// Find the project of a test file: the nearest csproj folder for C#, the nearest package.json
-/// folder for JS. C# projects only count if they reference a test framework.
+/// folder for JS, the package (its folder) for Odin. C# projects only count if they
+/// reference a test framework.
 pub fn detect_project(file: &Path) -> Option<Project> {
     let dir = file.parent()?;
+    if is_odin(file) {
+        return Some(Project {
+            root: dir.to_path_buf(),
+            name: dir.file_name().map_or_else(
+                || dir.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            runner: Some(Framework::Odin),
+            stories_runnable: false,
+            csproj: None,
+        });
+    }
     if is_cs(file) {
         for d in dir.ancestors() {
             let Ok(rd) = std::fs::read_dir(d) else {
@@ -396,6 +423,9 @@ pub fn discover(path: &Path, text: &str, project: &Project) -> Option<FileTests>
     if is_cs(path) {
         let fw = project.runner.filter(|r| r.is_dotnet())?;
         return Some(discover_cs::discover(text, fw));
+    }
+    if is_odin(path) {
+        return Some(discover_odin::discover(text));
     }
     match js_test_kind(path)? {
         Framework::Storybook => Some(discover_js::stories(path, text)),

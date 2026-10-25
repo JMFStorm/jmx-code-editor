@@ -30,9 +30,8 @@ settings). The tab with the blue line on top is where the cursor is.
 Syntax highlighting
 -------------------
 JavaScript (.js .mjs .cjs .jsx, also .ts), JSON, XML (.xml .svg ...), HTML,
-CSS, C# (.cs) and Vue files (template, script and style parts) are
-colored. The
-language is shown in the status bar.
+CSS, C# (.cs), Odin (.odin) and Vue files (template, script and style
+parts) are colored. The language is shown in the status bar.
 
 Formatting
 ----------
@@ -45,6 +44,7 @@ one installed globally; install it with: npm i -D prettier (needs Node.js).
 Prettier reads its settings from the nearest .prettierrc, prettier.config.*,
 the prettier key of package.json or .editorconfig, so a config file applies to
 its folder and everything below it; .prettierignore is respected.
+Odin files are formatted by ols (odinfmt; settings from odinfmt.json).
 Other files (C#, XML, plain text) get a basic cleanup: trailing spaces
 removed and a single newline at the end. Formatting is one undo step.
 
@@ -76,7 +76,8 @@ Tests
 -----
 The Tests list (Ctrl+Shift+T, in the panel) shows the tests of the workspace:
 spec and test files (Vitest or Jest: describe / it / test), Storybook stories
-(*.stories.js/ts) and C# test methods (xUnit, NUnit, MSTest).
+(*.stories.js/ts), C# test methods (xUnit, NUnit, MSTest) and Odin @(test)
+procedures (run with odin test, one package at a time).
   F5               run the test (or describe block / test class) at the
                    cursor; in the Tests list: the selected test, file or project
   Shift+F5         run all tests
@@ -99,6 +100,18 @@ C# projects are built in the background (dotnet build) when a .cs file is
 saved; compiler errors and warnings appear in the Problems list. Saving a
 config file (eslint.config.js, package.json, tsconfig.json, .csproj,
 Directory.Build.props, .editorconfig ...) runs the affected checks again.
+
+Odin
+----
+Odin files get their code intelligence from ols, the Odin language server,
+which JDC starts when an .odin file opens (ols and odin must be on PATH, or
+set JDC_OLS / JDC_ODIN). Its project root is the nearest folder with an
+ols.json (collections and other ols settings go there), else the workspace
+folder. ols gives the doc popups (also for core: and base: packages, from
+their source comments), parameter hints, F12, Shift+F12, formatting and
+compiler errors in the Problems list (checked as you type and on save).
+Ctrl+F12 on a name from Odin's own packages opens its page on
+pkg.odin-lang.org (asks first).
 
 Code navigation
 ---------------

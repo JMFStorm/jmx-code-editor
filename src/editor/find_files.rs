@@ -124,7 +124,8 @@ impl Editor {
         let tested = self.poll_tests();
         let indexed = self.poll_symbols() | self.poll_live_symbols();
         let referenced = self.poll_references();
-        self.poll_search() || formatted || linted || tested || indexed || referenced
+        let served = self.poll_lsp();
+        self.poll_search() || formatted || linted || tested || indexed || referenced || served
     }
 
     fn poll_search(&mut self) -> bool {
@@ -176,6 +177,7 @@ impl Editor {
             poll,
             self.tests_deadline(),
             self.live_symbols_deadline(),
+            self.lsp_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -191,6 +193,7 @@ impl Editor {
             || self.tests_busy()
             || self.symbols_scanning()
             || self.refs.running()
+            || self.lsp_busy()
     }
 
     /// Wait (blocking) until background work is done, up to `timeout`. For headless scripts.

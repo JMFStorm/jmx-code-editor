@@ -25,7 +25,8 @@ type RefResults = Vec<(PathBuf, Vec<Reference>)>;
 
 #[derive(Default)]
 pub struct RefState {
-    pub query: Option<RefQuery>,
+    /// The name searched for.
+    pub name: String,
     job: Option<Receiver<RefResults>>,
     pub results: RefResults,
     pub capped: bool,
@@ -74,13 +75,18 @@ impl Editor {
             self.info("Find All References works in the editor view");
             return;
         }
+        if self.lsp_references() {
+            return;
+        }
         let head = self.doc().selection.head;
         let Some(path) = self.doc().canonical.clone() else {
             self.info("Save the file first");
             return;
         };
         let Some(family) = symbols::family(&path) else {
-            self.info("Find All References works in JavaScript, TypeScript, Vue and C# files");
+            self.info(
+                "Find All References works in JavaScript, TypeScript, Vue, C# and Odin files",
+            );
             return;
         };
         let Some((name, found)) = self.resolve_at(EDITOR, head) else {
@@ -178,7 +184,7 @@ impl Editor {
             })
             .expect("cannot start the reference search");
         self.refs = RefState {
-            query: Some(query),
+            name: query.name.clone(),
             job: Some(rx),
             f4: true,
             ..Default::default()
@@ -187,6 +193,24 @@ impl Editor {
         self.refresh_references_page();
         // Back to the editor: the list fills in while you keep working.
         self.focus_view(EDITOR);
+    }
+
+    /// A language server's references to `name`, on the References page.
+    pub(super) fn show_lsp_references(&mut self, name: String, results: RefResults) {
+        let n: usize = results.iter().map(|(_, r)| r.len()).sum();
+        self.refs = RefState {
+            name: name.clone(),
+            results,
+            f4: true,
+            ..Default::default()
+        };
+        self.open_virtual(REFERENCES_TITLE, "");
+        self.refresh_references_page();
+        self.focus_view(EDITOR);
+        self.info(format!(
+            "{n} reference{} to `{name}` · F4 next",
+            if n == 1 { "" } else { "s" }
+        ));
     }
 
     /// Collect the search result. Returns true when it arrived.
@@ -201,12 +225,7 @@ impl Editor {
                 self.refs.results = results;
                 self.refresh_references_page();
                 let n = self.refs.count();
-                let name = self
-                    .refs
-                    .query
-                    .as_ref()
-                    .map_or("", |q| q.name.as_str())
-                    .to_string();
+                let name = self.refs.name.clone();
                 self.info(format!(
                     "{n} reference{} to `{name}` · F4 next",
                     if n == 1 { "" } else { "s" }
@@ -248,10 +267,11 @@ impl Editor {
 
     fn references_text(&self) -> PageText<Target> {
         let mut page: PageText<Target> = PageText::new(self.panel_width());
-        let Some(q) = &self.refs.query else {
+        if self.refs.name.is_empty() {
             page.line("Shift+F12 on a name lists its references.", None);
             return page;
-        };
+        }
+        let q = &self.refs;
         let n = self.refs.count();
         let head = if self.refs.running() {
             format!("'{}' — searching {} …", q.name, super::linting::spinner())
@@ -432,8 +452,7 @@ mod tests {
         ed.execute(Command::FindAllReferences);
         wait(&mut ed);
         assert!(!ed.refs.running());
-        let q = ed.refs.query.as_ref().unwrap();
-        assert_eq!(q.name, "formatCurrency");
+        assert_eq!(ed.refs.name, "formatCurrency");
         // format.js (the declaration, first), app.js (import + alias use), Card.vue (template
         // + import); the comment and the string don't count.
         let files: Vec<String> = ed

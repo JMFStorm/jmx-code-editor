@@ -4,6 +4,7 @@ mod formatting;
 pub mod history;
 pub mod hover;
 mod linting;
+mod lsp;
 mod testing;
 pub use linting::{PROBLEMS_TITLE, is_spinner, spinner};
 pub use testing::{TESTS_TITLE, status_glyph};
@@ -148,6 +149,8 @@ pub struct Editor {
     pub located: Option<linting::Located>,
     /// Find All References: the last search and its page.
     pub refs: references::RefState,
+    /// Language servers and their waiting requests.
+    pub lsp: lsp::LspState,
     /// Open web pages in the browser (off for headless runs and tests).
     pub launch_urls: bool,
     /// The last web page opened (or that would have been).
@@ -198,6 +201,7 @@ impl Editor {
             hover: None,
             symbols: symbols::SymbolState::default(),
             refs: references::RefState::default(),
+            lsp: lsp::LspState::default(),
             located: None,
             syntax_pending: false,
             query_cache: Default::default(),

@@ -191,7 +191,7 @@ impl Editor {
                         .flatten()
                     {
                         let path = entry.into_path();
-                        if !(tx::is_cs(&path) || tx::js_test_kind(&path).is_some()) {
+                        if !tx::may_have_tests(&path) {
                             continue;
                         }
                         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -265,7 +265,7 @@ impl Editor {
             let Some(path) = &doc.canonical else {
                 continue;
             };
-            if !(tx::is_cs(path) || tx::js_test_kind(path).is_some()) {
+            if !tx::may_have_tests(path) {
                 continue;
             }
             if self.tests.seen.get(path) != Some(&doc.revision) {
@@ -439,7 +439,7 @@ impl Editor {
         let open = self.find_doc(|d| d.canonical.as_deref() == Some(path.as_path()));
         let mut changed = false;
         self.symbols_file_changed(&path, removed);
-        if tx::is_cs(&path) || tx::js_test_kind(&path).is_some() {
+        if tx::may_have_tests(&path) {
             if removed {
                 self.tests.tree.remove_file(&path);
                 changed = true;
@@ -731,7 +731,21 @@ impl Editor {
                     files.push(t.file.clone());
                 }
             }
-            let filter = if dotnet {
+            let odin = project.runner == Some(Framework::Odin);
+            let filter = if odin {
+                // `ODIN_TEST_NAMES`: package.name, comma separated.
+                match &what {
+                    RunWhat::All => None,
+                    _ => Some(
+                        tests
+                            .iter()
+                            .filter_map(|t| t.found.full_name.as_ref())
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                }
+            } else if dotnet {
                 match &what {
                     RunWhat::All => None,
                     RunWhat::Suite(_, _, Some(full)) => Some(format!("FullyQualifiedName~{full}.")),
@@ -756,7 +770,7 @@ impl Editor {
                     _ => None,
                 }
             };
-            if all_of_project || dotnet {
+            if all_of_project || dotnet || odin {
                 files.clear();
             }
             let ids: Vec<(String, u64)> =
@@ -1062,7 +1076,7 @@ impl Editor {
                 .iter()
                 .flat_map(|p| p.docs.iter())
                 .filter_map(|d| d.canonical.clone())
-                .filter(|p| tx::is_cs(p) || tx::js_test_kind(p).is_some())
+                .filter(|p| tx::may_have_tests(p))
                 .collect();
             for p in open {
                 self.reparse_tests(&p);

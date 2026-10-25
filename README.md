@@ -12,7 +12,7 @@ extension ecosystem to maintain.
 - Delete line (Ctrl+K), revert the file to its saved state (Ctrl+R, one undo step)
 - Prettier formatting with the project's own config: Ctrl+S then S formats and saves,
   Shift+Alt+F formats only
-- Syntax highlighting for JavaScript / TypeScript, Vue, HTML, CSS, JSON, XML and C#
+- Syntax highlighting for JavaScript / TypeScript, Vue, HTML, CSS, JSON, XML, C# and Odin
 
 **Finding things**
 - Quick Open (Ctrl+P) over the workspace, with an optional line: `appvue:42`
@@ -23,7 +23,8 @@ extension ecosystem to maintain.
 **Checks**
 - Problems list: ESLint for the whole project and as you edit, Roslyn (`dotnet build`)
   errors and warnings, filters for errors / warnings / messages, F4 to step through them
-- Tests view (Ctrl+Shift+T): Vitest, Jest and `dotnet test` (xUnit, NUnit, MSTest); tests are
+- Tests view (Ctrl+Shift+T): Vitest, Jest, `dotnet test` (xUnit, NUnit, MSTest) and
+  `odin test` (`@(test)` procs); tests are
   found statically and stay in sync with your edits (a changed test goes back to "not run"),
   failures in a box under the selected test and on the gutter mark
 
@@ -39,6 +40,9 @@ extension ecosystem to maintain.
   `node_modules`, JSDoc types followed through `@typedef` to their interfaces
 - On request (Ctrl+F12, always asks first): the Microsoft Learn, MDN or package docs page in
   your browser
+- Odin through its language server, [ols](https://github.com/DanielGavin/ols): doc popups,
+  parameter hints, Go to Definition, references, formatting and compiler problems; Ctrl+F12
+  opens pkg.odin-lang.org for Odin's own packages
 
 **Panel**
 The right view is for the editor's own pages: Help, Shortcuts, Problems, Tests, Docs and
@@ -91,8 +95,10 @@ JDC uses these tools when they are there, and works without them:
 - **Node projects:** the project's own `prettier`, `eslint`, `vitest` or `jest` from
   `node_modules/.bin`.
 - **.NET:** the `dotnet` SDK, for builds, tests and the offline API docs.
-- **Overrides:** `JDC_PRETTIER`, `JDC_ESLINT`, `JDC_VITEST`, `JDC_JEST` and `JDC_DOTNET` point
-  to a specific tool; `JDC_LOG` sets the log level.
+- **Odin:** `odin` (tests) and `ols` (code intelligence, formatting, problems). Build ols with
+  the same Odin release you use: newer ols commits can need a newer Odin.
+- **Overrides:** `JDC_PRETTIER`, `JDC_ESLINT`, `JDC_VITEST`, `JDC_JEST`, `JDC_DOTNET`, `JDC_ODIN`
+  and `JDC_OLS` point to a specific tool; `JDC_LOG` sets the log level.
 
 ## Headless mode
 
@@ -114,10 +120,11 @@ src/
   symbols/       code indexing: JS/TS/Vue, C#, .d.ts, .NET XML docs, npm packages, MDN
   syntax/        highlighting lexers
   lint/          ESLint and Roslyn
+  lsp/           language server client (ols for Odin)
   test_explorer/ test discovery and runners
   workspace/     workspaces, file index, search
   render/        wgpu renderer
   ui/            explorer, picker, menus, layout
-sandbox/         mock projects for trying it out (Vue dashboard, .NET inventory API)
+sandbox/         mock projects for trying it out (Vue dashboard, .NET inventory API, Odin)
 tests/           headless end-to-end tests
 ```

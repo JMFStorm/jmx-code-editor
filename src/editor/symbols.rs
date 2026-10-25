@@ -1130,6 +1130,9 @@ impl Editor {
 
     /// The doc popup lines for the name at `pos` of view `pane`, if it names a declaration.
     pub(super) fn symbol_hover(&self, pane: usize, pos: usize) -> Option<Vec<(String, HoverKind)>> {
+        if let Some(lines) = self.lsp_hover_lines(pane, pos) {
+            return lines;
+        }
         let (_, found) = self.resolve_at(pane, pos)?;
         let first = found.first()?;
         // npm overloads: F12 goes to the documented one, so they aren't counted.
@@ -1146,6 +1149,9 @@ impl Editor {
     /// show them when hidden (typing `(` or `,`, Ctrl+Shift+Space); otherwise they only
     /// follow the cursor while shown.
     pub(super) fn update_signature(&mut self, open: bool) {
+        if self.lsp_signature(open) {
+            return;
+        }
         if !open && self.symbols.signature.is_none() {
             return;
         }
@@ -1191,6 +1197,9 @@ impl Editor {
     pub(super) fn go_to_definition(&mut self) {
         if self.focus != EDITOR || !self.has_doc() {
             self.info("Go to Definition works in the editor view");
+            return;
+        }
+        if self.lsp_definition(false) {
             return;
         }
         let head = self.doc().selection.head;
@@ -1247,12 +1256,7 @@ impl Editor {
                 return;
             }
         }
-        if let Some(here) = self.cursor_target() {
-            self.symbols.back.push(here);
-            if self.symbols.back.len() > MAX_BACK {
-                self.symbols.back.remove(0);
-            }
-        }
+        self.push_back();
         if let [(f, role)] = found.as_slice() {
             let t = Target {
                 path: f.path.clone(),
@@ -1415,6 +1419,9 @@ impl Editor {
             self.info("Put the cursor on a name in the editor");
             return;
         }
+        if self.lsp_definition(true) {
+            return;
+        }
         let head = self.doc().selection.head;
         let Some((name, found)) = self.resolve_at(EDITOR, head) else {
             self.info("No name at the cursor");
@@ -1462,6 +1469,16 @@ impl Editor {
         match crate::process::open_url(url) {
             Ok(()) => self.info(format!("Opened {url}")),
             Err(e) => self.warn(e),
+        }
+    }
+
+    /// Remember the cursor for Alt+Left (before Go to Definition jumps).
+    pub(super) fn push_back(&mut self) {
+        if let Some(here) = self.cursor_target() {
+            self.symbols.back.push(here);
+            if self.symbols.back.len() > MAX_BACK {
+                self.symbols.back.remove(0);
+            }
         }
     }
 

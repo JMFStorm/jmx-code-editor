@@ -37,6 +37,8 @@ pub enum Key {
     Js { file: PathBuf, path: Vec<String> },
     /// .NET: `Namespace.Class.Method` (parameters removed).
     Dotnet(String),
+    /// Odin: `package.name`.
+    Odin(String),
 }
 
 #[derive(Debug, Default)]
@@ -142,6 +144,7 @@ fn run(req: &Request, cancel: &AtomicBool) -> Report {
     match req.project.runner {
         Some(Framework::Vitest | Framework::Jest) => run_js(req, cancel),
         Some(fw) if fw.is_dotnet() => run_dotnet(req, cancel),
+        Some(Framework::Odin) => run_odin(req, cancel),
         _ => Report {
             error: Some(format!("No test runner found for {}", req.project.name)),
             ..Default::default()
@@ -265,6 +268,131 @@ fn run_dotnet(req: &Request, cancel: &AtomicBool) -> Report {
         Err(e) => report.error = Some(e),
     }
     report
+}
+
+fn run_odin(req: &Request, cancel: &AtomicBool) -> Report {
+    let Some(bin) = process::find_tool("odin", "JDC_ODIN") else {
+        return Report {
+            error: Some("odin not found (put it on PATH or set JDC_ODIN)".into()),
+            ..Default::default()
+        };
+    };
+    let json = temp_report("json");
+    // The test executable goes to the temp folder, not next to the sources.
+    let exe = temp_report(if cfg!(windows) { "exe" } else { "bin" });
+    let mut args: Vec<OsString> = vec![
+        "test".into(),
+        req.project.root.clone().into_os_string(),
+        "-define:ODIN_TEST_FANCY=false".into(),
+        format!("-define:ODIN_TEST_JSON_REPORT={}", json.display()).into(),
+        format!("-out:{}", exe.display()).into(),
+    ];
+    if let Some(f) = &req.filter {
+        args.push(format!("-define:ODIN_TEST_NAMES={f}").into());
+    }
+    let refs: Vec<&std::ffi::OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let out = process::run_cancellable(&bin, &refs, &req.project.root, "", RUN_TIMEOUT, cancel);
+    let report_text = std::fs::read_to_string(&json).unwrap_or_default();
+    let _ = std::fs::remove_file(&json);
+    let _ = std::fs::remove_file(&exe);
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            return Report {
+                error: Some(e),
+                ..Default::default()
+            };
+        }
+    };
+    let log = format!("{}\n{}", out.stdout, out.stderr);
+    if report_text.is_empty() {
+        let first = log
+            .lines()
+            .find(|l| l.contains("Error:"))
+            .or_else(|| log.lines().find(|l| !l.trim().is_empty()))
+            .unwrap_or("no output");
+        return Report {
+            error: Some(format!("Build failed: {}", first.trim())),
+            ..Default::default()
+        };
+    }
+    match parse_odin_report(&report_text, &log) {
+        Ok(outcomes) => Report {
+            outcomes,
+            ..Default::default()
+        },
+        Err(e) => Report {
+            error: Some(e),
+            ..Default::default()
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct OdinReport {
+    #[serde(default)]
+    packages: HashMap<String, Vec<OdinTest>>,
+}
+
+#[derive(Deserialize)]
+struct OdinTest {
+    name: String,
+    success: bool,
+}
+
+/// The `ODIN_TEST_JSON_REPORT` file, with failure messages from the runner's log lines:
+/// `[ERROR] --- [time] [vec_test.odin:18:scale_doubles()] expected …`.
+fn parse_odin_report(json: &str, log: &str) -> Result<Vec<Outcome>, String> {
+    let report: OdinReport =
+        serde_json::from_str(json).map_err(|e| format!("bad odin test report: {e}"))?;
+    let mut failures: HashMap<&str, Vec<String>> = HashMap::new();
+    for line in log.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("[ERROR]") else {
+            continue;
+        };
+        // The location is the last `[...]` before the message.
+        let Some(open) = rest.find("] [").map(|k| k + 2) else {
+            continue;
+        };
+        let Some(close) = rest[open..].find("] ").map(|k| open + k) else {
+            continue;
+        };
+        let loc = &rest[open + 1..close];
+        let msg = rest[close + 1..].trim();
+        let Some(proc_name) = loc.rsplit(':').next().and_then(|p| p.strip_suffix("()")) else {
+            continue;
+        };
+        let place = loc.rsplit_once(':').map_or(loc, |(p, _)| p);
+        failures
+            .entry(proc_name)
+            .or_default()
+            .push(format!("{msg}\n  at {place}"));
+    }
+    let mut out = Vec::new();
+    for (pkg, tests) in &report.packages {
+        for t in tests {
+            let lines = failures.get(t.name.as_str());
+            out.push(Outcome {
+                key: Key::Odin(format!("{pkg}.{}", t.name)),
+                status: if t.success {
+                    Status::Passed
+                } else {
+                    Status::Failed
+                },
+                duration: None,
+                message: (!t.success)
+                    .then(|| {
+                        lines
+                            .and_then(|l| l.first())
+                            .map(|m| m.lines().next().unwrap_or("").to_string())
+                    })
+                    .flatten(),
+                detail: (!t.success).then(|| lines.map(|l| l.join("\n"))).flatten(),
+                row: None,
+            });
+        }
+    }
+    Ok(out)
 }
 
 // Jest / Vitest JSON report.
@@ -582,7 +710,9 @@ pub fn match_outcome<'a>(test: &TestCase, outcomes: &'a [Outcome]) -> Vec<&'a Ou
 
 fn outcome_matches(test: &TestCase, o: &Outcome) -> bool {
     match &o.key {
-        Key::Dotnet(name) => test.found.full_name.as_deref() == Some(name.as_str()),
+        Key::Dotnet(name) | Key::Odin(name) => {
+            test.found.full_name.as_deref() == Some(name.as_str())
+        }
         Key::Js { file, path } => {
             if *file != test.file {
                 return false;
@@ -612,7 +742,9 @@ impl<'a> OutcomeIndex<'a> {
         };
         for o in outcomes {
             match &o.key {
-                Key::Dotnet(name) => ix.dotnet.entry(name.as_str()).or_default().push(o),
+                Key::Dotnet(name) | Key::Odin(name) => {
+                    ix.dotnet.entry(name.as_str()).or_default().push(o)
+                }
                 Key::Js { file, .. } => ix.js.entry(file.as_path()).or_default().push(o),
             }
         }
@@ -785,6 +917,37 @@ pub fn name_pattern(path: &[String], whole: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn odin_report_with_failure_messages() {
+        let json = r#"{ "total": 2, "success": 1, "duration": 110837, "packages": { "geometry": [
+            { "success": true, "name": "adds" }, { "success": false, "name": "scale_doubles" } ] } }"#;
+        let log = "[INFO ] --- [2026-10-25 05:03:48] Starting test runner with 3 threads.\n\
+                   [ERROR] --- [2026-10-25 05:03:48] [vec_test.odin:18:scale_doubles()] expected 5, got 4\n";
+        let out = parse_odin_report(json, log).unwrap();
+        let mut out: Vec<_> = out
+            .into_iter()
+            .map(|o| (o.key, o.status, o.message, o.detail))
+            .collect();
+        out.sort_by_key(|o| format!("{:?}", o.0));
+        assert_eq!(
+            out,
+            vec![
+                (
+                    Key::Odin("geometry.adds".into()),
+                    Status::Passed,
+                    None,
+                    None
+                ),
+                (
+                    Key::Odin("geometry.scale_doubles".into()),
+                    Status::Failed,
+                    Some("expected 5, got 4".into()),
+                    Some("expected 5, got 4\n  at vec_test.odin:18".into())
+                ),
+            ]
+        );
+    }
     use crate::test_explorer::{Found, hash_text};
 
     fn case(file: &str, suite: &[&str], name: &str, full: Option<&str>) -> TestCase {

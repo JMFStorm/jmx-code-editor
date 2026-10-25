@@ -12,6 +12,7 @@ mod help;
 mod keymap;
 mod lint;
 mod logging;
+mod lsp;
 mod paths;
 mod perf;
 mod process;

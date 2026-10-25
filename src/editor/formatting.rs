@@ -30,6 +30,9 @@ impl Editor {
             }
             return;
         };
+        if self.lsp_format(then_save) {
+            return;
+        }
         let mut hint = None;
         let dir = path.parent().unwrap_or(Path::new("."));
         let prettier = if format::prettier_supports(&path) {
@@ -153,7 +156,7 @@ impl Editor {
 
     /// Save a document that may not be the focused one, keeping the current status message
     /// unless saving fails.
-    fn save_doc(&mut self, pane: usize, index: usize) {
+    pub(super) fn save_doc(&mut self, pane: usize, index: usize) {
         let doc = &mut self.panes[pane].docs[index];
         match doc.save() {
             Ok(()) => {

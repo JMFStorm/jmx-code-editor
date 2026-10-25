@@ -45,6 +45,22 @@ pub fn find_node_tool(name: &str, env_var: &str, dir: &Path) -> Option<PathBuf> 
     })
 }
 
+/// A native tool: `$env_var` if set, else `name` on `PATH`.
+pub fn find_tool(name: &str, env_var: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(env_var).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    let name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(&name))
+        .find(|p| p.is_file())
+}
+
 /// Run `program args` in `cwd`, writing `stdin` to it, and collect its output.
 pub fn run(
     program: &Path,

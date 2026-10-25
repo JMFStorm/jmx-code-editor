@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 /// How long the mouse rests on a problem or test mark before its popup opens.
 const HOVER_DELAY: Duration = Duration::from_millis(300);
+/// How often a popup waiting for a language server's docs looks again.
+const HOVER_RECHECK: Duration = Duration::from_millis(20);
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::CursorIcon;
@@ -662,6 +664,13 @@ impl Session {
             return false;
         };
         if since.elapsed() < HOVER_DELAY {
+            return false;
+        }
+        // A language server's docs: wait for its reply (looking again shortly).
+        if self.editor.lsp_hover_wait(target, false) {
+            self.hover_pending = Instant::now()
+                .checked_sub(HOVER_DELAY - HOVER_RECHECK)
+                .map(|since| (target, since, (x, y)));
             return false;
         }
         self.hover_pending = None;

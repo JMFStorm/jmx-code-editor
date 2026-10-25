@@ -8,6 +8,7 @@ mod docs_page;
 mod js;
 mod json;
 mod markup;
+mod odin;
 mod problems;
 mod references;
 mod tests_page;
@@ -34,6 +35,7 @@ pub enum Lang {
     JavaScript,
     Css,
     CSharp,
+    Odin,
     /// The Problems page (not a file type).
     Problems,
     /// The Tests page.
@@ -59,6 +61,7 @@ impl Lang {
             "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" => Lang::JavaScript,
             "css" => Lang::Css,
             "cs" | "csx" => Lang::CSharp,
+            "odin" => Lang::Odin,
             _ => Lang::Plain,
         }
     }
@@ -73,6 +76,7 @@ impl Lang {
             Lang::JavaScript => "JavaScript",
             Lang::Css => "CSS",
             Lang::CSharp => "C#",
+            Lang::Odin => "Odin",
             Lang::Problems => "Problems",
             Lang::Docs => "Docs",
             Lang::References => "References",
@@ -125,6 +129,7 @@ pub struct State {
     pub js: js::State,
     pub css: css::State,
     pub csharp: csharp::State,
+    pub odin: odin::State,
     pub markup: markup::State,
 }
 
@@ -143,6 +148,7 @@ pub fn highlight_line(lang: Lang, state: &State, line: &str) -> (Vec<Span>, Stat
         Lang::JavaScript => js::lex(&mut lx, &mut st.js, chars.len()),
         Lang::Css => css::lex(&mut lx, &mut st.css, chars.len()),
         Lang::CSharp => csharp::lex(&mut lx, &mut st.csharp, chars.len()),
+        Lang::Odin => odin::lex(&mut lx, &mut st.odin, chars.len()),
         Lang::Problems => problems::lex(&mut lx),
         Lang::Tests => tests_page::lex(&mut lx),
         Lang::Docs => docs_page::lex(&mut lx),
@@ -500,6 +506,7 @@ mod tests {
         assert_eq!(Lang::from_path(Path::new("x.d.ts")), Lang::JavaScript);
         assert_eq!(Lang::from_path(Path::new("p.JSON")), Lang::Json);
         assert_eq!(Lang::from_path(Path::new("logo.svg")), Lang::Xml);
+        assert_eq!(Lang::from_path(Path::new("main.odin")), Lang::Odin);
         assert_eq!(Lang::from_path(Path::new("Makefile")), Lang::Plain);
     }
 
@@ -520,6 +527,7 @@ mod tests {
             Lang::JavaScript,
             Lang::Css,
             Lang::CSharp,
+            Lang::Odin,
             Lang::Problems,
             Lang::Tests,
             Lang::Docs,

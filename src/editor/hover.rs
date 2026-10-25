@@ -276,6 +276,30 @@ impl Editor {
         let doc = self.doc();
         let line = doc.rope.char_to_line(doc.selection.head);
         let col = doc.selection.head - doc.rope.line_to_char(line);
+        // A language server's docs are asked for first (this runs again on the reply).
+        let on_word = |c: usize| {
+            doc.rope
+                .get_char(doc.rope.line_to_char(line) + c)
+                .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+        };
+        let word_col = if on_word(col) {
+            Some(col)
+        } else {
+            col.checked_sub(1).filter(|&c| on_word(c))
+        };
+        let pane = self.focus;
+        if let Some(c) = word_col
+            && self.lsp_hover_wait(
+                HoverTarget {
+                    pane,
+                    line,
+                    col: Some(c),
+                },
+                true,
+            )
+        {
+            return;
+        }
         let at = |col: usize| HoverTarget {
             pane: self.focus,
             line,
